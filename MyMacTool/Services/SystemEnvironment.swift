@@ -65,6 +65,32 @@ final class SystemEnvironment {
         return installed
     }
 
+    /// Kiểm tra openai-whisper (module whisper) đã cài chưa. Nếu chưa → tự động cài.
+    /// Trả về true nếu đã sẵn sàng sử dụng.
+    func ensureWhisper(python: String, onStatus: ((String) -> Void)? = nil) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if _whisperVerified { return true }
+
+        // Kiểm tra đã cài chưa
+        if Self.checkWhisperInstalled(pythonPath: python) {
+            _whisperVerified = true
+            return true
+        }
+
+        // Chưa có → tự động cài
+        onStatus?("Đang cài đặt openai-whisper...")
+        print("📦 openai-whisper chưa có, đang cài...")
+
+        let installed = Self.installWhisper(pythonPath: python)
+        if installed {
+            _whisperVerified = true
+            print("✅ Cài openai-whisper thành công!")
+        } else {
+            print("❌ Cài openai-whisper thất bại")
+        }
+        return installed
+    }
+
     /// Kiểm tra edge-tts đã cài trong Python env chưa.
     func verifyEdgeTTS(python: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -152,6 +178,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = ["-m", "yt_dlp", "--version"]
+        process.environment = Self.pythonEnvironment()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -170,6 +197,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-m", "whisper", "--help"]
+        process.environment = Self.pythonEnvironment()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -187,6 +215,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-c", "import faster_whisper; print('ok')"]
+        process.environment = Self.pythonEnvironment()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -206,6 +235,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-c", "import edge_tts; print('ok')"]
+        process.environment = Self.pythonEnvironment()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -226,12 +256,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-m", "pip", "install", "faster-whisper"]
-
-        // Đảm bảo PATH có brew paths
-        var env = ProcessInfo.processInfo.environment
-        let currentPath = env["PATH"] ?? ""
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(currentPath)"
-        process.environment = env
+        process.environment = Self.pythonEnvironment()
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -250,5 +275,80 @@ final class SystemEnvironment {
             print("❌ pip install faster-whisper error:", error)
             return false
         }
+    }
+
+    /// Tự động cài openai-whisper bằng pip
+    private static func installWhisper(pythonPath: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pythonPath)
+        process.arguments = ["-m", "pip", "install", "openai-whisper"]
+        process.environment = Self.pythonEnvironment()
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            print("pip install openai-whisper output:\n\(output)")
+
+            return process.terminationStatus == 0
+        } catch {
+            print("❌ pip install openai-whisper error:", error)
+            return false
+        }
+    }
+
+    // MARK: - Environment Helper
+
+    /// Trả về environment dict đầy đủ PATH + PYTHONPATH cho subprocess.
+    /// Đảm bảo user site-packages và Homebrew paths luôn có mặt,
+    /// kể cả khi app chạy từ Xcode/Launchpad với PATH tối giản.
+    static func pythonEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+
+        // Mở rộng PATH
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin"
+        let extraPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(home)/Library/Python/3.9/bin",
+            "\(home)/Library/Python/3.10/bin",
+            "\(home)/Library/Python/3.11/bin",
+            "\(home)/Library/Python/3.12/bin",
+            "\(home)/Library/Python/3.13/bin",
+            "\(home)/.local/bin"
+        ]
+        env["PATH"] = (extraPaths + [currentPath]).joined(separator: ":")
+
+        // Đảm bảo Python thấy user site-packages
+        let userSitePackages = [
+            "\(home)/Library/Python/3.9/lib/python/site-packages",
+            "\(home)/Library/Python/3.10/lib/python/site-packages",
+            "\(home)/Library/Python/3.11/lib/python/site-packages",
+            "\(home)/Library/Python/3.12/lib/python/site-packages",
+            "\(home)/Library/Python/3.13/lib/python/site-packages"
+        ].filter { FileManager.default.fileExists(atPath: $0) }
+
+        if !userSitePackages.isEmpty {
+            let existing = env["PYTHONPATH"] ?? ""
+            let allPaths = userSitePackages + (existing.isEmpty ? [] : [existing])
+            env["PYTHONPATH"] = allPaths.joined(separator: ":")
+        }
+
+        // Đảm bảo HOME được set (sandbox có thể thiếu)
+        if env["HOME"] == nil {
+            env["HOME"] = home
+        }
+
+        // Không disable user site-packages
+        env["PYTHONNOUSERSITE"] = nil
+
+        return env
     }
 }

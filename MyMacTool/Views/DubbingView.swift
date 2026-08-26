@@ -153,6 +153,45 @@ struct DubbingTaskDetailView: View {
                     .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: 450)
+            } else if let installHint = Self.installHint(for: task.statusMessage), task.status.isError {
+                // Hiển thị hướng dẫn cài đặt khi thiếu dependency
+                VStack(spacing: 10) {
+                    Text(task.statusMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Hướng dẫn cài đặt:")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+
+                        ForEach(installHint.steps, id: \.self) { step in
+                            HStack(alignment: .top, spacing: 6) {
+                                Text("•")
+                                Text(step)
+                                    .textSelection(.enabled)
+                            }
+                            .font(.system(.caption, design: .monospaced))
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: 450, alignment: .leading)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(installHint.copyCommand, forType: .string)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "doc.on.doc")
+                            Text("Copy lệnh cài đặt")
+                        }
+                        .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .frame(maxWidth: 450)
             } else {
                 Text(task.statusMessage)
                     .font(.caption)
@@ -197,5 +236,61 @@ struct DubbingTaskDetailView: View {
         case .done: return .green
         case .error: return .red
         }
+    }
+
+    // MARK: - Install Hints
+
+    private struct InstallHint {
+        let steps: [String]
+        let copyCommand: String
+    }
+
+    private static func installHint(for message: String) -> InstallHint? {
+        let lower = message.lowercased()
+
+        if lower.contains("edge-tts") {
+            return InstallHint(
+                steps: [
+                    "Mở Terminal trên máy",
+                    "Chạy lệnh: pip3 install edge-tts",
+                    "Nếu lỗi permission: pip3 install --user edge-tts",
+                    "Sau đó mở lại app và thử lại"
+                ],
+                copyCommand: "pip3 install edge-tts"
+            )
+        } else if lower.contains("python") {
+            return InstallHint(
+                steps: [
+                    "Cài Python3 qua Homebrew:",
+                    "  brew install python3",
+                    "Hoặc tải từ: https://www.python.org/downloads/",
+                    "Sau khi cài xong, mở lại app"
+                ],
+                copyCommand: "brew install python3"
+            )
+        } else if lower.contains("ffmpeg") {
+            return InstallHint(
+                steps: [
+                    "Cài FFmpeg qua Homebrew:",
+                    "  brew install ffmpeg",
+                    "Nếu chưa có Homebrew:",
+                    "  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
+                    "Sau khi cài xong, mở lại app"
+                ],
+                copyCommand: "brew install ffmpeg"
+            )
+        } else if lower.contains("faster-whisper") || lower.contains("whisper") {
+            return InstallHint(
+                steps: [
+                    "Mở Terminal trên máy",
+                    "Chạy lệnh: pip3 install faster-whisper",
+                    "Nếu lỗi permission: pip3 install --user faster-whisper",
+                    "Sau đó mở lại app và thử lại"
+                ],
+                copyCommand: "pip3 install faster-whisper"
+            )
+        }
+
+        return nil
     }
 }

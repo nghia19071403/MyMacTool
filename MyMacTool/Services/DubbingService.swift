@@ -122,10 +122,10 @@ final class DubbingService {
 
         process.arguments = ["-c", script]
 
-        var env = ProcessInfo.processInfo.environment
-        let currentPath = env["PATH"] ?? ""
+        var env = SystemEnvironment.pythonEnvironment()
         let ffmpegDir = URL(fileURLWithPath: ffmpeg).deletingLastPathComponent().path
-        env["PATH"] = "\(ffmpegDir):/opt/homebrew/bin:/usr/local/bin:\(currentPath)"
+        let currentPath = env["PATH"] ?? ""
+        env["PATH"] = "\(ffmpegDir):\(currentPath)"
         process.environment = env
 
         let pipe = Pipe()

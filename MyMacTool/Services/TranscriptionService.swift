@@ -83,11 +83,11 @@ final class TranscriptionService: ObservableObject {
                 return
             }
 
-            self.updateStatus(task, progress: 0.15, message: "Đang kiểm tra faster-whisper...")
-            guard SystemEnvironment.shared.ensureFasterWhisper(python: python, onStatus: { msg in
+            self.updateStatus(task, progress: 0.15, message: "Đang kiểm tra Whisper...")
+            guard SystemEnvironment.shared.ensureWhisper(python: python, onStatus: { msg in
                 self.updateStatus(task, progress: 0.15, message: msg)
             }) else {
-                self.fail(task, message: "Không thể cài faster-whisper. Thử chạy: pip3 install faster-whisper")
+                self.fail(task, message: "Không tìm thấy openai-whisper. Thử chạy: pip3 install openai-whisper")
                 return
             }
 
@@ -97,7 +97,7 @@ final class TranscriptionService: ObservableObject {
         }
     }
 
-    // MARK: - Run faster-whisper
+    // MARK: - Run Whisper CLI
 
     private func runWhisperProcess(task: VideoTask, python: String, ffmpeg: String) {
         let outputDirectory = task.url.deletingLastPathComponent()
@@ -105,53 +105,30 @@ final class TranscriptionService: ObservableObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
 
-        // Script Python inline chạy faster-whisper, xuất file SRT
-        let script = """
-        import sys
-        from faster_whisper import WhisperModel
+        // Chọn model
+        let modelName: String
+        if task.whisperModel == .auto {
+            let durationSeconds = Self.parseDurationSeconds(task.videoDuration)
+            modelName = WhisperModel.recommend(forDuration: durationSeconds)
+        } else {
+            modelName = task.whisperModel.modelName
+        }
 
-        input_file = sys.argv[1]
-        output_dir = sys.argv[2]
-        model_size = sys.argv[3]
+        // Dùng openai-whisper CLI: python3 -m whisper <file> --language Chinese --task transcribe --model <model> --output_dir <dir> --output_format all
+        process.arguments = [
+            "-m", "whisper",
+            task.url.path,
+            "--language", "Chinese",
+            "--task", "transcribe",
+            "--model", modelName,
+            "--output_dir", outputDirectory.path,
+            "--output_format", "srt"
+        ]
 
-        import os
-        base_name = os.path.splitext(os.path.basename(input_file))[0]
-        srt_path = os.path.join(output_dir, base_name + ".srt")
-
-        print("Loading model...", flush=True)
-        model = WhisperModel(model_size, device="cpu", compute_type="int8")
-
-        print("Transcribing...", flush=True)
-        segments, info = model.transcribe(input_file, language="zh", beam_size=5)
-
-        print(f"Detected language: {info.language} (prob={info.language_probability:.2f})", flush=True)
-
-        def format_timestamp(seconds):
-            hours = int(seconds // 3600)
-            minutes = int((seconds % 3600) // 60)
-            secs = int(seconds % 60)
-            millis = int((seconds - int(seconds)) * 1000)
-            return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
-
-        with open(srt_path, "w", encoding="utf-8") as f:
-            for i, segment in enumerate(segments, start=1):
-                start_ts = format_timestamp(segment.start)
-                end_ts = format_timestamp(segment.end)
-                f.write(f"{i}\\n")
-                f.write(f"{start_ts} --> {end_ts}\\n")
-                f.write(f"{segment.text.strip()}\\n\\n")
-
-                progress = min(int((segment.end / max(info.duration, 1)) * 100), 100)
-                print(f"[progress] {progress}%", flush=True)
-
-        print("Done!", flush=True)
-        """
-
-        process.arguments = ["-c", script, task.url.path, outputDirectory.path, "small"]
-
-        var environment = ProcessInfo.processInfo.environment
-        let currentPath = environment["PATH"] ?? ""
+        // Dùng environment đầy đủ để Python tìm thấy packages + ffmpeg
+        var environment = SystemEnvironment.pythonEnvironment()
         let ffmpegDir = URL(fileURLWithPath: ffmpeg).deletingLastPathComponent().path
+        let currentPath = environment["PATH"] ?? ""
         environment["PATH"] = "\(ffmpegDir):\(currentPath)"
         process.environment = environment
 
@@ -189,19 +166,19 @@ final class TranscriptionService: ObservableObject {
                 if finishedProcess.terminationStatus == 0 {
                     self.handleWhisperSuccess(task: task, outputDirectory: outputDirectory)
                 } else {
-                    self.fail(task, message: "faster-whisper thất bại. Exit code: \(finishedProcess.terminationStatus)")
+                    self.fail(task, message: "Whisper thất bại. Exit code: \(finishedProcess.terminationStatus)")
                 }
             }
         }
 
         do {
             try process.run()
-            updateStatus(task, progress: 0.20, message: "Đang tải model faster-whisper...")
+            updateStatus(task, progress: 0.20, message: "Đang chạy Whisper (model: \(modelName))...")
         } catch {
             fileHandle.readabilityHandler = nil
             task.process = nil
             task.pipe = nil
-            fail(task, message: "Không thể chạy faster-whisper: \(error.localizedDescription)")
+            fail(task, message: "Không thể chạy Whisper: \(error.localizedDescription)")
         }
     }
 
@@ -274,9 +251,6 @@ final class TranscriptionService: ObservableObject {
             openOutputFolder(outputDirectory)
             taskFinished()
         }
-            openOutputFolder(outputDirectory)
-            taskFinished()
-        }
     }
 
     // MARK: - Output Parsing
@@ -332,5 +306,16 @@ final class TranscriptionService: ObservableObject {
 
     private func openOutputFolder(_ folderURL: URL) {
         NSWorkspace.shared.open(folderURL)
+    }
+
+    /// Parse duration string "12:34" hoặc "1:02:30" thành giây
+    private static func parseDurationSeconds(_ str: String) -> Double {
+        let parts = str.split(separator: ":").compactMap { Double($0) }
+        switch parts.count {
+        case 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        case 2: return parts[0] * 60 + parts[1]
+        case 1: return parts[0]
+        default: return 600 // fallback 10 phút → sẽ dùng "small"
+        }
     }
 }

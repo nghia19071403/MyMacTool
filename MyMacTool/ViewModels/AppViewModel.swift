@@ -238,22 +238,8 @@ final class AppViewModel: ObservableObject {
         let voice = dubbingVoice
         let rate = "+0%"
 
-        // Câu mẫu theo ngôn ngữ
-        let sampleText: String
-        switch voice.language {
-        case "vi":
-            sampleText = "Xin chào, đây là giọng đọc mẫu để bạn nghe thử trước khi lồng tiếng."
-        case "en":
-            sampleText = "Hello, this is a sample voice preview so you can hear how it sounds before dubbing."
-        case "zh":
-            sampleText = "大家好，这是一段语音试听样本，让你听听这个声音怎么样。"
-        case "ja":
-            sampleText = "こんにちは、これは吹き替え前に声を確認するためのサンプルです。"
-        case "ko":
-            sampleText = "안녕하세요, 더빙 전에 목소리를 확인할 수 있는 샘플입니다."
-        default:
-            sampleText = "Xin chào, đây là giọng đọc mẫu để bạn nghe thử trước khi lồng tiếng."
-        }
+        // Câu mẫu tiếng Việt
+        let sampleText = "Xin chào, đây là giọng đọc mẫu để bạn nghe thử trước khi lồng tiếng."
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
