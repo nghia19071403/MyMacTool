@@ -14,6 +14,9 @@ final class TranscriptionService: ObservableObject {
         didSet { tryStartNext() }
     }
 
+    /// Callback khi SRT được tạo xong (gốc hoặc dịch) — dùng để auto trigger dubbing
+    var onSRTCreated: ((URL) -> Void)?
+
     private var runningCount = 0
     private var pending: [VideoTask] = []
     private let envQueue = DispatchQueue(label: "env-check", qos: .userInitiated)
@@ -240,18 +243,21 @@ final class TranscriptionService: ObservableObject {
                         }
 
                         switch result {
-                        case .success:
+                        case .success(let translatedURL):
                             let msg = srtOption == .both
                                 ? "Hoàn tất! File SRT gốc + bản dịch tiếng Việt đã được tạo."
                                 : "Hoàn tất! File phụ đề tiếng Việt đã được tạo."
                             task.progress = 1.0
                             task.statusMessage = msg
                             task.status = .done
+                            self.onSRTCreated?(translatedURL)
 
                         case .failure(let error):
                             task.progress = 1.0
                             task.statusMessage = "SRT đã tạo. Dịch lỗi: \(error.localizedDescription)"
                             task.status = .done
+                            // Dù dịch lỗi, vẫn trigger dubbing với file gốc
+                            self.onSRTCreated?(srtURL)
                         }
 
                         self.openOutputFolder(outputDirectory)
@@ -264,6 +270,10 @@ final class TranscriptionService: ObservableObject {
             task.progress = 1.0
             task.statusMessage = "Hoàn tất! File SRT gốc đã được tạo."
             task.status = .done
+            onSRTCreated?(srtURL)
+            openOutputFolder(outputDirectory)
+            taskFinished()
+        }
             openOutputFolder(outputDirectory)
             taskFinished()
         }

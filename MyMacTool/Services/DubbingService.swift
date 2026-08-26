@@ -69,12 +69,12 @@ final class DubbingService {
             try? FileManager.default.removeItem(at: tempDir)
         }
 
-        // 3. Chạy Python script: parse SRT → edge-tts → tạo audio từng segment → concat → merge
+        // 3. Chạy Python script: parse SRT → edge-tts → tạo audio từng segment → ghép thành 1 file audio
         updateStatus(task, progress: 0.10, message: "Đang tạo giọng đọc...")
 
-        let outputDir = task.videoURL.deletingLastPathComponent()
-        let baseName = task.videoURL.deletingPathExtension().lastPathComponent
-        let outputPath = outputDir.appendingPathComponent("\(baseName)_dubbed.mp4").path
+        let outputDir = task.srtURL.deletingLastPathComponent()
+        let baseName = task.srtURL.deletingPathExtension().lastPathComponent
+        let outputPath = outputDir.appendingPathComponent("\(baseName)_dubbed.mp3").path
 
         let success = runDubbingScript(
             task: task,
@@ -87,7 +87,7 @@ final class DubbingService {
         if success {
             DispatchQueue.main.async {
                 task.progress = 1.0
-                task.statusMessage = "Hoàn tất! Video lồng tiếng đã được tạo."
+                task.statusMessage = "Hoàn tất! File audio lồng tiếng đã được tạo."
                 task.status = .done
                 NSWorkspace.shared.open(outputDir)
             }
@@ -106,18 +106,18 @@ final class DubbingService {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
 
-        // Script Python: parse SRT → edge-tts từng segment → concat → merge FFmpeg
+        // Script Python: parse SRT → edge-tts từng segment → ghép thành 1 file audio
         let script = Self.buildPythonScript(
             srtPath: task.srtURL.path,
-            videoPath: task.videoURL.path,
+            videoPath: "",
             outputPath: outputPath,
             tempDir: tempDir.path,
             ffmpegPath: ffmpeg,
             voice: task.voice.voiceName,
             pitch: task.voice.pitch,
-            rate: task.speedRate,
-            keepOriginal: task.keepOriginalAudio,
-            originalVolume: task.originalVolume
+            rate: "+0%",
+            keepOriginal: false,
+            originalVolume: 0
         )
 
         process.arguments = ["-c", script]
@@ -205,15 +205,12 @@ final class DubbingService {
 
         # --- Config ---
         SRT_PATH = r\"\"\"\(srtPath)\"\"\"
-        VIDEO_PATH = r\"\"\"\(videoPath)\"\"\"
         OUTPUT_PATH = r\"\"\"\(outputPath)\"\"\"
         TEMP_DIR = r\"\"\"\(tempDir)\"\"\"
         FFMPEG = r\"\"\"\(ffmpegPath)\"\"\"
         VOICE = "\(voice)"
         PITCH = "\(pitch)"
         RATE = "\(rate)"
-        KEEP_ORIGINAL = \(keepOriginal ? "True" : "False")
-        ORIGINAL_VOLUME = \(originalVolume)
 
         # --- Parse SRT ---
         def parse_srt(path):
@@ -253,7 +250,6 @@ final class DubbingService {
                     communicate = edge_tts.Communicate(seg['text'], VOICE, rate=RATE, pitch=PITCH)
                     await communicate.save(out_file)
                 except Exception as e:
-                    # Nếu TTS fail cho câu này → tạo file silence ngắn thay thế
                     failed += 1
                     print(f"[warn] TTS lỗi câu {i+1}: {str(e)[:80]}", flush=True)
                     # Tạo 1s silence thay thế
@@ -263,15 +259,23 @@ final class DubbingService {
                         '-q:a', '2', out_file
                     ], capture_output=True)
                 seg['audio_file'] = out_file
-                progress = int((i + 1) / total * 70)
+                progress = int((i + 1) / total * 80)
                 print(f"[progress] {progress}%", flush=True)
                 if (i + 1) % 10 == 0:
                     print(f"[tts] {i+1}/{total} câu (lỗi: {failed})", flush=True)
 
-        # --- Build full audio track with silence padding ---
-        def build_full_audio(segments, duration):
-            \"\"\"Dùng FFmpeg ghép các segment audio theo đúng timestamp.\"\"\"
-            # Tạo file silence dài bằng video
+        # --- Build full audio with silence padding theo timestamp ---
+        def build_full_audio(segments):
+            \"\"\"Ghép các segment audio theo đúng timestamp SRT → 1 file MP3.\"\"\"
+            if not segments:
+                print("[error] Không có segment nào!", flush=True)
+                sys.exit(1)
+
+            # Tính tổng duration từ segment cuối
+            last_end = ts_to_seconds(segments[-1]['end'])
+            duration = last_end + 1  # thêm 1s buffer
+
+            # Tạo file silence nền
             silent_path = os.path.join(TEMP_DIR, "silent.mp3")
             subprocess.run([
                 FFMPEG, '-y', '-f', 'lavfi', '-i',
@@ -280,10 +284,7 @@ final class DubbingService {
                 '-q:a', '2', silent_path
             ], capture_output=True)
 
-            if not segments:
-                return silent_path
-
-            # Tạo filter complex: overlay từng segment vào đúng vị trí
+            # Filter complex: overlay từng segment vào đúng vị trí
             inputs = ['-i', silent_path]
             filter_parts = []
 
@@ -293,34 +294,34 @@ final class DubbingService {
                     continue
                 inputs.extend(['-i', audio_file])
                 start_sec = ts_to_seconds(seg['start'])
-                # Input index = i+1 (0 là silent)
                 filter_parts.append(f"[{i+1}]adelay={int(start_sec*1000)}|{int(start_sec*1000)}[d{i}]")
 
             if not filter_parts:
-                return silent_path
+                # Fallback: concat đơn giản
+                return build_simple_concat(segments)
 
-            # Mix tất cả lại
             mix_inputs = "[0]" + "".join(f"[d{i}]" for i in range(len(filter_parts)))
             filter_str = ";".join(filter_parts) + f";{mix_inputs}amix=inputs={len(filter_parts)+1}:duration=first[out]"
 
-            mixed_path = os.path.join(TEMP_DIR, "dubbed_audio.mp3")
             cmd = [FFMPEG, '-y'] + inputs + [
                 '-filter_complex', filter_str,
                 '-map', '[out]',
                 '-ac', '1', '-ar', '44100',
-                mixed_path
+                OUTPUT_PATH
             ]
+
+            print("[progress] 85%", flush=True)
+            print("[build] Đang ghép audio theo timestamp...", flush=True)
 
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                print(f"[error] FFmpeg mix error: {result.stderr[:300]}", flush=True)
-                # Fallback: concat đơn giản
+                print(f"[warn] FFmpeg mix lỗi, dùng concat fallback: {result.stderr[:200]}", flush=True)
                 return build_simple_concat(segments)
 
-            return mixed_path
+            return OUTPUT_PATH
 
         def build_simple_concat(segments):
-            \"\"\"Fallback: nối các audio segment liên tiếp (không căn timestamp).\"\"\"
+            \"\"\"Fallback: nối các audio segment liên tiếp.\"\"\"
             list_path = os.path.join(TEMP_DIR, "concat_list.txt")
             with open(list_path, 'w') as f:
                 for seg in segments:
@@ -328,67 +329,11 @@ final class DubbingService {
                     if audio_file and os.path.exists(audio_file):
                         f.write(f"file '{audio_file}'\\n")
 
-            concat_path = os.path.join(TEMP_DIR, "concat_audio.mp3")
             subprocess.run([
                 FFMPEG, '-y', '-f', 'concat', '-safe', '0',
-                '-i', list_path, '-c', 'copy', concat_path
+                '-i', list_path, '-c', 'copy', OUTPUT_PATH
             ], capture_output=True)
-            return concat_path
-
-        # --- Merge with video ---
-        def merge_with_video(audio_path):
-            print("[progress] 85%", flush=True)
-            print("[merge] Đang ghép audio vào video...", flush=True)
-
-            if KEEP_ORIGINAL:
-                # Mix: giữ audio gốc (giảm volume) + thêm giọng đọc
-                cmd = [
-                    FFMPEG, '-y',
-                    '-i', VIDEO_PATH,
-                    '-i', audio_path,
-                    '-filter_complex',
-                    f'[0:a]volume={ORIGINAL_VOLUME}[orig];[1:a]volume=1.0[dub];[orig][dub]amix=inputs=2:duration=first[out]',
-                    '-map', '0:v',
-                    '-map', '[out]',
-                    '-c:v', 'copy',
-                    '-c:a', 'aac', '-b:a', '192k',
-                    '-shortest',
-                    OUTPUT_PATH
-                ]
-            else:
-                # Thay hoàn toàn audio gốc bằng giọng đọc
-                cmd = [
-                    FFMPEG, '-y',
-                    '-i', VIDEO_PATH,
-                    '-i', audio_path,
-                    '-map', '0:v',
-                    '-map', '1:a',
-                    '-c:v', 'copy',
-                    '-c:a', 'aac', '-b:a', '192k',
-                    '-shortest',
-                    OUTPUT_PATH
-                ]
-
-            print("[progress] 90%", flush=True)
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"[error] Merge failed: {result.stderr[:300]}", flush=True)
-                sys.exit(1)
-
-            print("[progress] 100%", flush=True)
-            print("Done!", flush=True)
-
-        # --- Get video duration ---
-        def get_video_duration():
-            result = subprocess.run([
-                FFMPEG, '-i', VIDEO_PATH
-            ], capture_output=True, text=True)
-            # Parse duration from stderr
-            match = re.search(r'Duration:\\s*(\\d+):(\\d+):([\\d.]+)', result.stderr)
-            if match:
-                h, m, s = int(match.group(1)), int(match.group(2)), float(match.group(3))
-                return h * 3600 + m * 60 + s
-            return 600  # fallback 10 phút
+            return OUTPUT_PATH
 
         # --- Main ---
         async def main():
@@ -406,13 +351,13 @@ final class DubbingService {
             # TTS
             await generate_audio_segments(segments)
 
-            print("[progress] 80%", flush=True)
-            print("[build] Đang ghép audio theo timestamp...", flush=True)
+            print("[progress] 82%", flush=True)
 
-            duration = get_video_duration()
-            audio_path = build_full_audio(segments, duration)
+            # Ghép thành 1 file audio
+            build_full_audio(segments)
 
-            merge_with_video(audio_path)
+            print("[progress] 100%", flush=True)
+            print("Done!", flush=True)
 
         asyncio.run(main())
         """

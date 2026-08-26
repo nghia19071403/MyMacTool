@@ -14,6 +14,15 @@ final class AppViewModel: ObservableObject {
     let transcriptionService = TranscriptionService()
     let dubbingService = DubbingService.shared
 
+    // MARK: - Init
+
+    init() {
+        // Auto-trigger dubbing khi SRT tạo xong
+        transcriptionService.onSRTCreated = { [weak self] srtURL in
+            self?.autoDubAfterSRT(srtURL: srtURL)
+        }
+    }
+
     // MARK: - State: Navigation
 
     @Published var selectedSidebarItem: SidebarItem = .platform(.bilibili)
@@ -47,11 +56,7 @@ final class AppViewModel: ObservableObject {
     // MARK: - State: Dubbing (tab lồng tiếng)
 
     @Published var dubbingSRTURL: URL?
-    @Published var dubbingVideoURL: URL?
     @Published var dubbingVoice: DubbingVoice = .viVNFemale
-    @Published var dubbingSpeed: String = "+0%"
-    @Published var dubbingKeepOriginal: Bool = false
-    @Published var dubbingOriginalVolume: Double = 0.2
     @Published var currentDubbingTask: DubbingTask?
     @Published var isPreviewingVoice: Bool = false
 
@@ -186,26 +191,19 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func pickVideoFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.movie, .video, .mpeg4Movie, .quickTimeMovie]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "Chọn file video gốc"
+    func startDubbing() {
+        guard let srtURL = dubbingSRTURL else { return }
 
-        if panel.runModal() == .OK {
-            dubbingVideoURL = panel.url
-        }
+        let task = DubbingTask(srtURL: srtURL, voice: dubbingVoice)
+        currentDubbingTask = task
+        dubbingService.start(task)
     }
 
-    func startDubbing() {
-        guard let srtURL = dubbingSRTURL, let videoURL = dubbingVideoURL else { return }
-
-        let task = DubbingTask(srtURL: srtURL, videoURL: videoURL, voice: dubbingVoice)
-        task.speedRate = dubbingSpeed
-        task.keepOriginalAudio = dubbingKeepOriginal
-        task.originalVolume = dubbingOriginalVolume
+    /// Auto-trigger: gọi sau khi tạo SRT xong để tự động lồng tiếng
+    func autoDubAfterSRT(srtURL: URL) {
+        let task = DubbingTask(srtURL: srtURL, voice: dubbingVoice)
         currentDubbingTask = task
+        selectedSidebarItem = .dubbing
         dubbingService.start(task)
     }
 
@@ -238,7 +236,7 @@ final class AppViewModel: ObservableObject {
         isPreviewingVoice = true
 
         let voice = dubbingVoice
-        let rate = dubbingSpeed
+        let rate = "+0%"
 
         // Câu mẫu theo ngôn ngữ
         let sampleText: String

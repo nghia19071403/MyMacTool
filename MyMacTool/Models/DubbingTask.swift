@@ -1,7 +1,7 @@
 import Foundation
 import Combine
 
-/// Đại diện cho 1 task lồng tiếng: SRT + Video → Video có giọng đọc.
+/// Đại diện cho 1 task lồng tiếng: SRT → file audio giọng đọc.
 final class DubbingTask: Identifiable, ObservableObject, Equatable {
 
     let id = UUID()
@@ -9,36 +9,23 @@ final class DubbingTask: Identifiable, ObservableObject, Equatable {
     /// File SRT đầu vào
     let srtURL: URL
 
-    /// File video gốc (để ghép audio vào)
-    let videoURL: URL
-
     @Published var status: TaskStatus = .idle
     @Published var progress: Double = 0
     @Published var statusMessage = "Sẵn sàng"
 
-    /// Giọng đọc edge-tts (mặc định giọng nữ Việt Nam)
+    /// Giọng đọc edge-tts
     var voice: DubbingVoice = .viVNFemale
-
-    /// Tốc độ đọc (ví dụ: "+0%", "+10%", "-10%")
-    var speedRate: String = "+0%"
-
-    /// Giữ audio gốc (mix) hay thay hoàn toàn
-    var keepOriginalAudio: Bool = false
-
-    /// Âm lượng audio gốc khi mix (0.0 - 1.0)
-    var originalVolume: Double = 0.2
 
     /// Process đang chạy
     var process: Process?
 
-    init(srtURL: URL, videoURL: URL, voice: DubbingVoice = .viVNFemale) {
+    init(srtURL: URL, voice: DubbingVoice = .viVNFemale) {
         self.srtURL = srtURL
-        self.videoURL = videoURL
         self.voice = voice
     }
 
     var displayName: String {
-        videoURL.deletingPathExtension().lastPathComponent
+        srtURL.deletingPathExtension().lastPathComponent
     }
 
     var srtDisplayName: String {

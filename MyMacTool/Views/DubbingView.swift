@@ -30,11 +30,11 @@ struct DubbingSetupView: View {
                 .font(.system(size: 55))
                 .foregroundStyle(.blue)
 
-            Text("Lồng tiếng video")
+            Text("Lồng tiếng")
                 .font(.title2)
                 .fontWeight(.semibold)
 
-            Text("Chọn file SRT + video gốc → tạo video lồng tiếng tự động")
+            Text("Chọn file SRT → tạo file audio giọng đọc theo timestamp")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
@@ -58,29 +58,6 @@ struct DubbingSetupView: View {
 
                 Button("Chọn...") {
                     vm.pickSRTFile()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-
-            // File Video
-            HStack {
-                Text("Video gốc:")
-                    .frame(width: 80, alignment: .leading)
-
-                if let video = vm.dubbingVideoURL {
-                    Text(video.lastPathComponent)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: 250, alignment: .leading)
-                } else {
-                    Text("Chưa chọn")
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: 250, alignment: .leading)
-                }
-
-                Button("Chọn...") {
-                    vm.pickVideoFile()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -117,51 +94,18 @@ struct DubbingSetupView: View {
                 .help("Nghe thử giọng đọc")
             }
 
-            // Tốc độ
-            HStack {
-                Text("Tốc độ:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Picker("", selection: $vm.dubbingSpeed) {
-                    Text("Chậm (-20%)").tag("-20%")
-                    Text("Hơi chậm (-10%)").tag("-10%")
-                    Text("Bình thường").tag("+0%")
-                    Text("Hơi nhanh (+10%)").tag("+10%")
-                    Text("Nhanh (+20%)").tag("+20%")
-                    Text("Rất nhanh (+30%)").tag("+30%")
-                }
-                .pickerStyle(.menu)
-                .frame(maxWidth: 200)
-            }
-
-            // Giữ audio gốc
-            HStack {
-                Toggle("Giữ audio gốc (mix nhỏ)", isOn: $vm.dubbingKeepOriginal)
-                    .font(.caption)
-                    .toggleStyle(.checkbox)
-
-                if vm.dubbingKeepOriginal {
-                    Text("Volume gốc: \(Int(vm.dubbingOriginalVolume * 100))%")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Slider(value: $vm.dubbingOriginalVolume, in: 0.05...0.5, step: 0.05)
-                        .frame(maxWidth: 100)
-                }
-            }
-
             // Button bắt đầu
             Button {
                 vm.startDubbing()
             } label: {
                 HStack {
                     Image(systemName: "play.fill")
-                    Text("Bắt đầu lồng tiếng")
+                    Text("Tạo file audio")
                 }
                 .frame(minWidth: 200)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(vm.dubbingSRTURL == nil || vm.dubbingVideoURL == nil)
+            .disabled(vm.dubbingSRTURL == nil)
             .padding(.top, 8)
         }
     }
