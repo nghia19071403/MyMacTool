@@ -17,6 +17,9 @@ final class TranscriptionService: ObservableObject {
     /// Callback khi SRT được tạo xong (gốc hoặc dịch) — dùng để auto trigger dubbing
     var onSRTCreated: ((URL) -> Void)?
 
+    /// Callback khi task bị lỗi
+    var onTaskFailed: ((String, String) -> Void)?
+
     private var runningCount = 0
     private var pending: [VideoTask] = []
     private let envQueue = DispatchQueue(label: "env-check", qos: .userInitiated)
@@ -76,6 +79,7 @@ final class TranscriptionService: ObservableObject {
                 self.fail(task, message: "Không tìm thấy Python3.")
                 return
             }
+            print("🐍 Using Python: \(python)")
 
             self.updateStatus(task, progress: 0.10, message: "Đang kiểm tra FFmpeg...")
             guard let ffmpeg = SystemEnvironment.shared.resolveFFmpeg() else {
@@ -114,16 +118,54 @@ final class TranscriptionService: ObservableObject {
             modelName = task.whisperModel.modelName
         }
 
-        // Dùng openai-whisper CLI: python3 -m whisper <file> --language Chinese --task transcribe --model <model> --output_dir <dir> --output_format all
-        process.arguments = [
-            "-m", "whisper",
-            task.url.path,
-            "--language", "Chinese",
-            "--task", "transcribe",
-            "--model", modelName,
-            "--output_dir", outputDirectory.path,
-            "--output_format", "srt"
-        ]
+        // Script Python inline dùng faster-whisper
+        let script = """
+        import sys
+        import os
+
+        input_file = sys.argv[1]
+        output_dir = sys.argv[2]
+        model_size = sys.argv[3]
+
+        base_name = os.path.splitext(os.path.basename(input_file))[0]
+        srt_path = os.path.join(output_dir, base_name + ".srt")
+
+        try:
+            print("Loading model...", flush=True)
+            from faster_whisper import WhisperModel
+            model = WhisperModel(model_size, device="cpu", compute_type="int8")
+
+            print("Transcribing...", flush=True)
+            segments, info = model.transcribe(input_file, language="zh", beam_size=5)
+
+            print(f"Detected language: {info.language} (prob={info.language_probability:.2f})", flush=True)
+
+            def format_timestamp(seconds):
+                hours = int(seconds // 3600)
+                minutes = int((seconds % 3600) // 60)
+                secs = int(seconds % 60)
+                millis = int((seconds - int(seconds)) * 1000)
+                return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+            with open(srt_path, "w", encoding="utf-8") as f:
+                for i, segment in enumerate(segments, start=1):
+                    start_ts = format_timestamp(segment.start)
+                    end_ts = format_timestamp(segment.end)
+                    f.write(f"{i}\\n")
+                    f.write(f"{start_ts} --> {end_ts}\\n")
+                    f.write(f"{segment.text.strip()}\\n\\n")
+
+                    progress = min(int((segment.end / max(info.duration, 1)) * 100), 100)
+                    print(f"[progress] {progress}%", flush=True)
+
+            print("Done!", flush=True)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        """
+
+        process.arguments = ["-c", script, task.url.path, outputDirectory.path, modelName]
 
         // Dùng environment đầy đủ để Python tìm thấy packages + ffmpeg
         var environment = SystemEnvironment.pythonEnvironment()
@@ -154,8 +196,9 @@ final class TranscriptionService: ObservableObject {
             fileHandle.readabilityHandler = nil
 
             let remainingData = fileHandle.readDataToEndOfFile()
-            if !remainingData.isEmpty, let text = String(data: remainingData, encoding: .utf8) {
-                DispatchQueue.main.async { self?.handleOutput(task: task, output: text) }
+            let remainingText = String(data: remainingData, encoding: .utf8) ?? ""
+            if !remainingText.isEmpty {
+                DispatchQueue.main.async { self?.handleOutput(task: task, output: remainingText) }
             }
 
             DispatchQueue.main.async {
@@ -166,7 +209,12 @@ final class TranscriptionService: ObservableObject {
                 if finishedProcess.terminationStatus == 0 {
                     self.handleWhisperSuccess(task: task, outputDirectory: outputDirectory)
                 } else {
-                    self.fail(task, message: "Whisper thất bại. Exit code: \(finishedProcess.terminationStatus)")
+                    // Lấy dòng lỗi cuối cùng từ output
+                    let errorLines = remainingText.components(separatedBy: "\n")
+                        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                    let lastError = errorLines.last ?? "Exit code: \(finishedProcess.terminationStatus)"
+                    print("❌ Whisper failed output:\n\(remainingText)")
+                    self.fail(task, message: "Whisper thất bại: \(String(lastError.prefix(200)))")
                 }
             }
         }
@@ -300,6 +348,7 @@ final class TranscriptionService: ObservableObject {
             task.statusMessage = "Lỗi: \(message)"
             task.process = nil
             task.pipe = nil
+            self.onTaskFailed?(task.displayName, message)
             self.taskFinished()
         }
     }

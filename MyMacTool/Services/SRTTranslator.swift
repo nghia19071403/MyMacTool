@@ -1,10 +1,31 @@
 import Foundation
 
-/// Dịch file SRT tiếng Trung → tiếng Việt qua Google Translate (miễn phí).
+/// Dịch file SRT tiếng Trung → tiếng Việt.
+/// Cascade fallback theo thứ tự:
+///   1. OpenAI GPT (chất lượng cao nhất, cần API key)
+///   2. Google Translate (deep-translator, rất tốt)
+///   3. MyMemory (miễn phí, language code vi-VN)
+///   4. Argos Translate (offline, zh→en→vi, luôn hoạt động)
+///
+/// Khi engine hiện tại fail/hết quota → tự chuyển sang engine tiếp theo.
 final class SRTTranslator {
 
     static let shared = SRTTranslator()
-    private init() {}
+    private init() {
+        // Load API key đã lưu
+        openaiAPIKey = UserDefaults.standard.string(forKey: "openai_api_key") ?? ""
+        openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o-mini"
+    }
+
+    /// OpenAI API Key — set qua UI. Để trống = bỏ qua GPT.
+    var openaiAPIKey: String = "" {
+        didSet { UserDefaults.standard.set(openaiAPIKey, forKey: "openai_api_key") }
+    }
+
+    /// Model OpenAI dùng để dịch
+    var openaiModel: String = "gpt-4o-mini" {
+        didSet { UserDefaults.standard.set(openaiModel, forKey: "openai_model") }
+    }
 
     // MARK: - Public API
 
@@ -13,181 +34,338 @@ final class SRTTranslator {
         onProgress: @escaping (Double, String) -> Void,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            // 1. Đọc file
-            guard let content = try? String(contentsOf: srtURL, encoding: .utf8) else {
-                DispatchQueue.main.async { completion(.failure(SimpleError(message: "Không đọc được file SRT."))) }
-                return
-            }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
 
-            // 2. Parse
-            let blocks = self.parseSRT(content)
-            guard !blocks.isEmpty else {
-                DispatchQueue.main.async { completion(.failure(SimpleError(message: "File SRT rỗng hoặc không hợp lệ."))) }
-                return
-            }
+            DispatchQueue.main.async { onProgress(0.05, "Đang chuẩn bị dịch...") }
 
-            DispatchQueue.main.async { onProgress(0.05, "Đang dịch phụ đề sang tiếng Việt...") }
-
-            // 3. Dịch theo batch (20 dòng/batch để tránh text quá dài bị lỗi)
-            let batchSize = 20
-            let textLines = blocks.map { $0.text }
-            let batches = stride(from: 0, to: textLines.count, by: batchSize).map {
-                Array(textLines[$0..<min($0 + batchSize, textLines.count)])
-            }
-
-            let totalBatches = batches.count
-            let group = DispatchGroup()
-            var batchResults: [(Int, [String])] = []
-            let lock = NSLock()
-            var hasError: Error?
-
-            for (index, batch) in batches.enumerated() {
-                group.enter()
-
-                self.translateBatch(texts: batch) { result in
-                    switch result {
-                    case .success(let translated):
-                        lock.lock()
-                        batchResults.append((index, translated))
-                        lock.unlock()
-
-                        let progress = Double(index + 1) / Double(totalBatches)
-                        DispatchQueue.main.async {
-                            onProgress(0.05 + progress * 0.85, "Đang dịch... \(Int(progress * 100))%")
-                        }
-                    case .failure(let error):
-                        lock.lock()
-                        if hasError == nil { hasError = error }
-                        lock.unlock()
-                    }
-                    group.leave()
+            guard let python = SystemEnvironment.shared.resolvePython() else {
+                DispatchQueue.main.async {
+                    completion(.failure(SimpleError(message: "Không tìm thấy Python3.")))
                 }
-
-                // Delay tránh rate-limit
-                Thread.sleep(forTimeInterval: 0.5)
-            }
-
-            group.wait()
-
-            if let error = hasError {
-                DispatchQueue.main.async { completion(.failure(error)) }
                 return
             }
 
-            // 4. Ghép lại
-            batchResults.sort { $0.0 < $1.0 }
-            let translatedLines = batchResults.flatMap { $0.1 }
-
-            var outputContent = ""
-            for (i, block) in blocks.enumerated() {
-                let translated = i < translatedLines.count ? translatedLines[i] : block.text
-                outputContent += "\(block.index)\n\(block.timestamp)\n\(translated)\n\n"
-            }
-
-            // 5. Ghi file _vi.srt
             let originalName = srtURL.deletingPathExtension().lastPathComponent
             let outputURL = srtURL.deletingLastPathComponent().appendingPathComponent("\(originalName)_vi.srt")
 
-            do {
-                try outputContent.write(to: outputURL, atomically: true, encoding: .utf8)
-                DispatchQueue.main.async {
+            let success = self.runTranslateScript(
+                python: python,
+                srtPath: srtURL.path,
+                outputPath: outputURL.path,
+                openaiKey: self.openaiAPIKey,
+                openaiModel: self.openaiModel,
+                onProgress: onProgress
+            )
+
+            DispatchQueue.main.async {
+                if success {
                     onProgress(1.0, "Dịch xong!")
                     completion(.success(outputURL))
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    completion(.failure(SimpleError(message: "Không ghi được file dịch: \(error.localizedDescription)")))
+                } else {
+                    completion(.failure(SimpleError(message: "Tất cả engine dịch đều thất bại.")))
                 }
             }
         }
     }
 
-    // MARK: - SRT Parsing
+    // MARK: - Python Script
 
-    private struct SRTBlock {
-        let index: String
-        let timestamp: String
-        let text: String
-    }
+    private func runTranslateScript(
+        python: String,
+        srtPath: String,
+        outputPath: String,
+        openaiKey: String,
+        openaiModel: String,
+        onProgress: @escaping (Double, String) -> Void
+    ) -> Bool {
+        let script = """
+        import sys
+        import time
+        import json
 
-    private func parseSRT(_ content: String) -> [SRTBlock] {
-        var blocks: [SRTBlock] = []
-        let rawBlocks = content.components(separatedBy: "\n\n")
+        SRT_PATH = r\"\"\"\(srtPath)\"\"\"
+        OUTPUT_PATH = r\"\"\"\(outputPath)\"\"\"
+        OPENAI_KEY = "\(openaiKey)"
+        OPENAI_MODEL = "\(openaiModel)"
 
-        for rawBlock in rawBlocks {
-            let lines = rawBlock.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
-            guard lines.count >= 3 else { continue }
+        # --- Parse SRT ---
+        def parse_srt(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            blocks = content.strip().split('\\n\\n')
+            segments = []
+            for block in blocks:
+                lines = block.strip().split('\\n')
+                if len(lines) < 3:
+                    continue
+                index = lines[0].strip()
+                timestamp = lines[1].strip()
+                if '-->' not in timestamp:
+                    continue
+                text = '\\n'.join(lines[2:]).strip()
+                segments.append({'index': index, 'timestamp': timestamp, 'text': text})
+            return segments
 
-            let index = lines[0].trimmingCharacters(in: .whitespaces)
-            let timestamp = lines[1].trimmingCharacters(in: .whitespaces)
-            let text = lines[2...].joined(separator: "\n").trimmingCharacters(in: .whitespaces)
+        # --- Engine 1: OpenAI GPT ---
+        def translate_openai(texts):
+            if not OPENAI_KEY:
+                return None
+            print(f"[engine] 🟢 Đang dùng: OpenAI {OPENAI_MODEL}", flush=True)
+            try:
+                import urllib.request
+                results = []
+                # Dịch theo batch 20 câu để tiết kiệm request
+                batch_size = 20
+                for start in range(0, len(texts), batch_size):
+                    batch = texts[start:start+batch_size]
+                    # Đánh số từng câu để GPT giữ đúng thứ tự
+                    numbered = "\\n".join(f"{i+1}. {t}" for i, t in enumerate(batch))
+                    prompt = (
+                        "Dịch các câu phụ đề tiếng Trung sau sang tiếng Việt tự nhiên, "
+                        "giữ nguyên số thứ tự, mỗi câu 1 dòng, KHÔNG thêm giải thích. "
+                        "Chỉ trả về bản dịch theo định dạng '<số>. <bản dịch>':\\n\\n" + numbered
+                    )
+                    payload = {
+                        "model": OPENAI_MODEL,
+                        "messages": [
+                            {"role": "system", "content": "Bạn là dịch giả phụ đề chuyên nghiệp Trung-Việt."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.3
+                    }
+                    req = urllib.request.Request(
+                        "https://api.openai.com/v1/chat/completions",
+                        data=json.dumps(payload).encode('utf-8'),
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {OPENAI_KEY}"
+                        },
+                        method="POST"
+                    )
+                    try:
+                        with urllib.request.urlopen(req, timeout=60) as resp:
+                            data = json.loads(resp.read().decode('utf-8'))
+                        content = data['choices'][0]['message']['content'].strip()
+                    except Exception as e:
+                        err = str(e)
+                        if '401' in err:
+                            print("[warn] OpenAI API key không hợp lệ!", flush=True)
+                        elif '429' in err:
+                            print("[warn] OpenAI hết quota/rate-limit!", flush=True)
+                        else:
+                            print(f"[warn] OpenAI lỗi: {err[:80]}", flush=True)
+                        return None
 
-            guard timestamp.contains("-->") else { continue }
-            blocks.append(SRTBlock(index: index, timestamp: timestamp, text: text))
+                    # Parse kết quả có đánh số
+                    lines = [l.strip() for l in content.split('\\n') if l.strip()]
+                    batch_results = []
+                    for line in lines:
+                        # Bỏ số thứ tự đầu dòng "1. "
+                        if '. ' in line[:5]:
+                            line = line.split('. ', 1)[1]
+                        batch_results.append(line)
+                    # Đảm bảo đủ số câu
+                    while len(batch_results) < len(batch):
+                        batch_results.append(batch[len(batch_results)])
+                    results.extend(batch_results[:len(batch)])
+
+                    progress = int((start + batch_size) / len(texts) * 80)
+                    print(f"[progress] {min(progress, 80)}%", flush=True)
+                    time.sleep(0.3)
+                return results
+            except Exception as e:
+                print(f"[warn] OpenAI exception: {str(e)[:80]}", flush=True)
+                return None
+
+        # --- Engine 2: Google Translate ---
+        def translate_google(texts):
+            print("[engine] 🔵 Đang dùng: Google Translate", flush=True)
+            try:
+                from deep_translator import GoogleTranslator
+                translator = GoogleTranslator(source='zh-CN', target='vi')
+                results = []
+                consecutive_fail = 0
+                for i, text in enumerate(texts):
+                    try:
+                        translated = translator.translate(text)
+                        if translated:
+                            results.append(translated)
+                            consecutive_fail = 0
+                        else:
+                            results.append(text)
+                    except Exception as e:
+                        err = str(e).lower()
+                        # Nếu bị chặn/rate-limit nhiều lần liên tiếp → fallback
+                        if '429' in err or 'rate' in err or 'too many' in err or 'blocked' in err:
+                            consecutive_fail += 1
+                            if consecutive_fail >= 3:
+                                print(f"[warn] Google bị chặn liên tục tại câu {i+1}, chuyển engine", flush=True)
+                                return None
+                        results.append(text)
+                    if (i + 1) % 5 == 0:
+                        progress = int((i + 1) / len(texts) * 80)
+                        print(f"[progress] {min(progress, 80)}%", flush=True)
+                    time.sleep(0.6)
+                return results
+            except Exception as e:
+                print(f"[warn] Google exception: {str(e)[:80]}", flush=True)
+                return None
+
+        # --- Engine 2: MyMemory ---
+        def translate_mymemory(texts):
+            print("[engine] 🟡 Đang dùng: MyMemory Translate", flush=True)
+            try:
+                from deep_translator import MyMemoryTranslator
+                translator = MyMemoryTranslator(source='zh-CN', target='vi-VN')
+                results = []
+                for i, text in enumerate(texts):
+                    try:
+                        translated = translator.translate(text)
+                        results.append(translated if translated else text)
+                    except Exception as e:
+                        err = str(e).lower()
+                        if 'limit' in err or '429' in err or 'quota' in err:
+                            print(f"[warn] MyMemory hết quota tại câu {i+1}", flush=True)
+                            return None
+                        results.append(text)
+                    if (i + 1) % 5 == 0:
+                        progress = int((i + 1) / len(texts) * 80)
+                        print(f"[progress] {min(progress, 80)}%", flush=True)
+                    time.sleep(1.0)
+                return results
+            except Exception as e:
+                print(f"[warn] MyMemory exception: {str(e)[:80]}", flush=True)
+                return None
+
+        # --- Engine 3: Argos Translate (OFFLINE) ---
+        def translate_argos(texts):
+            print("[engine] ⚫ Đang dùng: Argos Translate (offline, zh→en→vi)", flush=True)
+            try:
+                import argostranslate.translate
+                results = []
+                for i, text in enumerate(texts):
+                    try:
+                        en_text = argostranslate.translate.translate(text, 'zh', 'en')
+                        vi_text = argostranslate.translate.translate(en_text, 'en', 'vi')
+                        results.append(vi_text if vi_text else text)
+                    except Exception:
+                        results.append(text)
+                    if (i + 1) % 5 == 0:
+                        progress = int((i + 1) / len(texts) * 80)
+                        print(f"[progress] {min(progress, 80)}%", flush=True)
+                return results
+            except Exception as e:
+                print(f"[error] Argos exception: {str(e)[:80]}", flush=True)
+                return None
+
+        # --- Main: Cascade ---
+        def main():
+            print("[progress] 5%", flush=True)
+            print("[info] Đang đọc file SRT...", flush=True)
+
+            segments = parse_srt(SRT_PATH)
+            if not segments:
+                print("[error] File SRT rỗng!", flush=True)
+                sys.exit(1)
+
+            print(f"[info] Tìm thấy {len(segments)} câu cần dịch", flush=True)
+            print("[progress] 10%", flush=True)
+
+            texts = [seg['text'] for seg in segments]
+
+            engines = [
+                ("OpenAI GPT", translate_openai),
+                ("Google", translate_google),
+                ("MyMemory", translate_mymemory),
+                ("Argos (offline)", translate_argos),
+            ]
+
+            translated = None
+            used_engine = None
+            for name, fn in engines:
+                result = fn(texts)
+                if result is not None and len(result) == len(texts):
+                    translated = result
+                    used_engine = name
+                    break
+                else:
+                    print(f"[fallback] {name} thất bại, thử engine tiếp theo...", flush=True)
+
+            if translated is None:
+                print("[error] Tất cả engine đều thất bại!", flush=True)
+                sys.exit(1)
+
+            print(f"[info] Dịch xong bằng {used_engine}!", flush=True)
+            print("[progress] 90%", flush=True)
+
+            with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
+                for i, seg in enumerate(segments):
+                    trans = translated[i] if i < len(translated) else seg['text']
+                    f.write(f"{seg['index']}\\n{seg['timestamp']}\\n{trans}\\n\\n")
+
+            print("[progress] 100%", flush=True)
+            print(f"[done] Hoàn tất! Engine: {used_engine}", flush=True)
+
+        main()
+        """
+
+        let scriptFile = FileManager.default.temporaryDirectory.appendingPathComponent("translate_srt.py")
+        try? script.write(to: scriptFile, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = [scriptFile.path]
+
+        var env = ProcessInfo.processInfo.environment
+        let currentPath = env["PATH"] ?? ""
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(currentPath)"
+        process.environment = env
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        let fileHandle = pipe.fileHandleForReading
+
+        fileHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+
+            for line in output.components(separatedBy: "\n") {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+
+                if trimmed.contains("[progress]"),
+                   let match = trimmed.range(of: #"\d+"#, options: .regularExpression) {
+                    let percent = Double(trimmed[match]) ?? 0
+                    DispatchQueue.main.async { onProgress(percent / 100.0, "") }
+                } else if trimmed.contains("[engine]") {
+                    let msg = trimmed.replacingOccurrences(of: "[engine] ", with: "")
+                    DispatchQueue.main.async { onProgress(-1, msg) }
+                } else if trimmed.contains("[info]") {
+                    let msg = trimmed.replacingOccurrences(of: "[info] ", with: "")
+                    DispatchQueue.main.async { onProgress(-1, msg) }
+                } else if trimmed.contains("[fallback]") {
+                    let msg = trimmed.replacingOccurrences(of: "[fallback] ", with: "")
+                    DispatchQueue.main.async { onProgress(-1, "⚠️ \(msg)") }
+                } else if trimmed.contains("[done]") {
+                    let msg = trimmed.replacingOccurrences(of: "[done] ", with: "")
+                    DispatchQueue.main.async { onProgress(1.0, "✅ \(msg)") }
+                }
+            }
         }
-        return blocks
-    }
 
-    // MARK: - Google Translate
-
-    private func translateBatch(texts: [String], completion: @escaping (Result<[String], Error>) -> Void) {
-        let separator = "\n"
-        let joinedText = texts.joined(separator: separator)
-
-        // Dùng POST request để tránh lỗi URL quá dài (GET bị giới hạn ~2000 ký tự)
-        guard let url = URL(string: "https://translate.googleapis.com/translate_a/single") else {
-            completion(.failure(SimpleError(message: "Lỗi tạo URL dịch.")))
-            return
+        do {
+            try process.run()
+            process.waitUntilExit()
+            fileHandle.readabilityHandler = nil
+            try? FileManager.default.removeItem(at: scriptFile)
+            return process.terminationStatus == 0
+        } catch {
+            fileHandle.readabilityHandler = nil
+            print("❌ Translate script error:", error)
+            return false
         }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
-
-        // Encode body parameters (an toàn hơn gửi qua URL)
-        let params = "client=gtx&sl=zh-CN&tl=vi&dt=t&q=\(joinedText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joinedText)"
-        request.httpBody = params.data(using: .utf8)
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error {
-                completion(.failure(SimpleError(message: "Lỗi Google Translate: \(error.localizedDescription)")))
-                return
-            }
-
-            guard let data else {
-                completion(.failure(SimpleError(message: "Google Translate không trả về data.")))
-                return
-            }
-
-            // Debug: in ra nếu không parse được
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
-                let bodyStr = String(data: data.prefix(500), encoding: .utf8) ?? "binary"
-                let httpCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-                print("❌ Google Translate parse fail (HTTP \(httpCode)): \(bodyStr)")
-                completion(.failure(SimpleError(message: "Google Translate lỗi (HTTP \(httpCode)). Có thể bị rate-limit.")))
-                return
-            }
-
-            guard let sentences = json.first as? [[Any]] else {
-                print("❌ Google Translate: json.first không phải [[Any]], json = \(json)")
-                completion(.failure(SimpleError(message: "Kết quả dịch không đúng format.")))
-                return
-            }
-
-            let translatedText = sentences.compactMap { $0.first as? String }.joined()
-            let translatedLines = translatedText.components(separatedBy: separator)
-
-            var result = translatedLines
-            while result.count < texts.count {
-                result.append(texts[result.count])
-            }
-            if result.count > texts.count {
-                result = Array(result.prefix(texts.count))
-            }
-
-            completion(.success(result))
-        }.resume()
     }
 }

@@ -23,6 +23,14 @@ final class SystemEnvironment {
         return found
     }
 
+    /// Reset cache — dùng khi cần re-detect (ví dụ sau khi cài package mới)
+    func resetCache() {
+        lock.lock(); defer { lock.unlock() }
+        _python = nil
+        _ffmpeg = nil
+        _whisperVerified = false
+    }
+
     func resolveFFmpeg() -> String? {
         lock.lock(); defer { lock.unlock() }
         if let cached = _ffmpeg { return cached }
@@ -97,6 +105,12 @@ final class SystemEnvironment {
         return Self.checkEdgeTTSInstalled(pythonPath: python)
     }
 
+    /// Kiểm tra VieNeu-TTS đã cài trong Python env chưa.
+    func verifyVieNeuTTS(python: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return Self.checkVieNeuInstalled(pythonPath: python)
+    }
+
     func resolveYtDlp(python: String?) -> YtDlpMethod? {
         lock.lock(); defer { lock.unlock() }
         if let cached = _ytdlp { return cached }
@@ -118,7 +132,19 @@ final class SystemEnvironment {
 
     private static func searchPython() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // Ưu tiên whisper-env (chứa tất cả package) trước system python
+        let whisperEnvPython = "\(home)/whisper-env/bin/python3"
+        if FileManager.default.isExecutableFile(atPath: whisperEnvPython) {
+            print("✅ Found Python (whisper-env):", whisperEnvPython)
+            return whisperEnvPython
+        }
+
         let paths = [
+            "\(home)/whisper/venv/bin/python3",
+            "\(home)/.venv/bin/python3",
+            "\(home)/venv/bin/python3",
+            "\(home)/miniconda3/bin/python3",
+            "\(home)/anaconda3/bin/python3",
             "/opt/homebrew/bin/python3",
             "/usr/local/bin/python3",
             "/usr/bin/python3",
@@ -127,13 +153,7 @@ final class SystemEnvironment {
             "\(home)/Library/Python/3.10/bin/python3",
             "\(home)/Library/Python/3.11/bin/python3",
             "\(home)/Library/Python/3.12/bin/python3",
-            "\(home)/Library/Python/3.13/bin/python3",
-            "\(home)/venv/bin/python3",
-            "\(home)/whisper-env/bin/python3",
-            "\(home)/whisper/venv/bin/python3",
-            "\(home)/.venv/bin/python3",
-            "\(home)/miniconda3/bin/python3",
-            "\(home)/anaconda3/bin/python3"
+            "\(home)/Library/Python/3.13/bin/python3"
         ]
         for path in paths where FileManager.default.isExecutableFile(atPath: path) {
             print("✅ Found Python:", path)
@@ -251,6 +271,25 @@ final class SystemEnvironment {
         }
     }
 
+    private static func checkVieNeuInstalled(pythonPath: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pythonPath)
+        process.arguments = ["-c", "import vieneu; print('ok')"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let ok = process.terminationStatus == 0
+            if ok { print("✅ Found VieNeu-TTS") }
+            return ok
+        } catch {
+            print("❌ VieNeu-TTS check error:", error)
+            return false
+        }
+    }
+
     /// Tự động cài faster-whisper bằng pip
     private static func installFasterWhisper(pythonPath: String) -> Bool {
         let process = Process()
@@ -315,6 +354,7 @@ final class SystemEnvironment {
         // Mở rộng PATH
         let currentPath = env["PATH"] ?? "/usr/bin:/bin"
         let extraPaths = [
+            "\(home)/whisper-env/bin",
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "\(home)/Library/Python/3.9/bin",
@@ -328,6 +368,10 @@ final class SystemEnvironment {
 
         // Đảm bảo Python thấy user site-packages
         let userSitePackages = [
+            "\(home)/whisper-env/lib/python3.14/site-packages",
+            "\(home)/whisper-env/lib/python3.13/site-packages",
+            "\(home)/whisper-env/lib/python3.12/site-packages",
+            "\(home)/whisper-env/lib/python3.11/site-packages",
             "\(home)/Library/Python/3.9/lib/python/site-packages",
             "\(home)/Library/Python/3.10/lib/python/site-packages",
             "\(home)/Library/Python/3.11/lib/python/site-packages",

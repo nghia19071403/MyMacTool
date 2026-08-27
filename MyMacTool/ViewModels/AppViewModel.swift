@@ -3,6 +3,7 @@ import Combine
 import AVFoundation
 import AppKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 /// ViewModel chính của app. Chứa toàn bộ state và logic nghiệp vụ.
 /// View chỉ hiển thị và gọi method trên ViewModel — không chứa logic.
@@ -17,15 +18,72 @@ final class AppViewModel: ObservableObject {
     // MARK: - Init
 
     init() {
+        // Reset cache để luôn dùng đúng Python (~/whisper-env)
+        SystemEnvironment.shared.resetCache()
+
+        // Xin quyền notification
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+
         // Auto-trigger dubbing khi SRT tạo xong
         transcriptionService.onSRTCreated = { [weak self] srtURL in
             self?.autoDubAfterSRT(srtURL: srtURL)
+            self?.sendNotification(title: "Tạo SRT hoàn tất ✅", body: srtURL.lastPathComponent)
         }
+
+        // Notification khi Whisper lỗi
+        transcriptionService.onTaskFailed = { [weak self] fileName, message in
+            self?.sendNotification(title: "Tạo SRT thất bại ❌", body: "\(fileName): \(message)")
+        }
+
+        // Lưu lịch sử khi dubbing xong
+        dubbingService.onTaskCompleted = { [weak self] task, success, outputPath in
+            let voiceLabel = task.clonedVoiceName ?? task.voice.displayName
+            self?.addDubbingHistoryItem(
+                srtName: task.srtDisplayName,
+                voiceLabel: voiceLabel,
+                success: success,
+                outputPath: outputPath
+            )
+            // Notification
+            if success {
+                self?.sendNotification(title: "Lồng tiếng hoàn tất ✅", body: "\(task.srtDisplayName) — giọng \(voiceLabel)")
+            } else {
+                self?.sendNotification(title: "Lồng tiếng thất bại ❌", body: task.srtDisplayName)
+            }
+        }
+        // Load OpenAI key đã lưu
+        openaiAPIKey = UserDefaults.standard.string(forKey: "openai_api_key") ?? ""
+        openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o-mini"
+
+        // Load giọng đã clone
+        loadClonedVoices()
+        loadDubbingHistory()
+
+        // Nếu có giọng clone → mặc định chọn giọng clone đầu tiên
+        if let firstClone = clonedVoices.first {
+            dubbingVoiceSelection = .cloned(firstClone.id)
+        }
+    }
+
+    // MARK: - Notification
+
+    private func sendNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: - State: Navigation
 
-    @Published var selectedSidebarItem: SidebarItem = .platform(.bilibili)
+    @Published var selectedSidebarItem: SidebarItem = .platform(.douyin)
     @Published var selectedTaskID: UUID?
 
     // MARK: - State: Video Tasks (tab kéo file / Whisper)
@@ -33,21 +91,27 @@ final class AppViewModel: ObservableObject {
     @Published var tasks: [VideoTask] = []
     @Published var hasActiveTasks = false
 
-    // MARK: - State: Link Download (tab Bilibili / Douyin)
+    // MARK: - State: Link Download (tab Douyin)
 
     @Published var linkTexts: [LinkPlatform: String] = [
-        .bilibili: "",
         .douyin: ""
     ]
 
     @Published var downloadTasks: [LinkPlatform: [DownloadTask]] = [
-        .bilibili: [],
         .douyin: []
     ]
 
     // MARK: - State: Settings
 
-    @Published var srtOutputOption: SRTOutputOption = .both
+    @Published var srtOutputOption: SRTOutputOption = .translatedOnly
+
+    // OpenAI settings cho dịch
+    @Published var openaiAPIKey: String = "" {
+        didSet { SRTTranslator.shared.openaiAPIKey = openaiAPIKey }
+    }
+    @Published var openaiModel: String = "gpt-4o-mini" {
+        didSet { SRTTranslator.shared.openaiModel = openaiModel }
+    }
 
     @Published var maxConcurrentClips: Int = 2 {
         didSet { transcriptionService.maxConcurrent = maxConcurrentClips }
@@ -56,9 +120,25 @@ final class AppViewModel: ObservableObject {
     // MARK: - State: Dubbing (tab lồng tiếng)
 
     @Published var dubbingSRTURL: URL?
-    @Published var dubbingVoice: DubbingVoice = .viVNFemale
+    @Published var dubbingVoice: DubbingVoice = .adam
+    @Published var dubbingVoiceSelection: VoiceSelection = .preset(.adam)
     @Published var currentDubbingTask: DubbingTask?
     @Published var isPreviewingVoice: Bool = false
+
+    // Clone voice
+    @Published var cloneRefAudioURL: URL?
+    @Published var cloneVoiceName: String = ""
+    @Published var clonedVoices: [ClonedVoice] = []
+    @Published var isCloning: Bool = false
+    @Published var cloneStatusMessage: String = ""
+    @Published var clonePreviewReady: Bool = false
+
+    // History
+    @Published var dubbingHistory: [DubbingHistoryItem] = []
+
+    // Tạm giữ data clone chờ user confirm
+    private var pendingClonedVoice: ClonedVoice?
+    private var clonePreviewAudioURL: URL?
 
     // MARK: - State: UI
 
@@ -194,14 +274,47 @@ final class AppViewModel: ObservableObject {
     func startDubbing() {
         guard let srtURL = dubbingSRTURL else { return }
 
-        let task = DubbingTask(srtURL: srtURL, voice: dubbingVoice)
+        let task: DubbingTask
+        switch dubbingVoiceSelection {
+        case .preset(let voice):
+            task = DubbingTask(srtURL: srtURL, voice: voice)
+        case .cloned(let id):
+            if let cloned = clonedVoices.first(where: { $0.id == id }) {
+                task = DubbingTask(srtURL: srtURL, voice: .adam)
+                task.clonedVoiceRef = cloned.audioURL
+                task.clonedVoiceName = cloned.name
+            } else {
+                task = DubbingTask(srtURL: srtURL, voice: .adam)
+            }
+        }
         currentDubbingTask = task
         dubbingService.start(task)
     }
 
     /// Auto-trigger: gọi sau khi tạo SRT xong để tự động lồng tiếng
+    /// Ưu tiên dùng giọng clone đầu tiên, nếu không có thì dùng giọng đang chọn
     func autoDubAfterSRT(srtURL: URL) {
-        let task = DubbingTask(srtURL: srtURL, voice: dubbingVoice)
+        let task: DubbingTask
+        if let firstClone = clonedVoices.first {
+            // Ưu tiên giọng clone
+            task = DubbingTask(srtURL: srtURL, voice: .adam)
+            task.clonedVoiceRef = firstClone.audioURL
+            task.clonedVoiceName = firstClone.name
+        } else {
+            // Fallback giọng preset đang chọn
+            switch dubbingVoiceSelection {
+            case .preset(let voice):
+                task = DubbingTask(srtURL: srtURL, voice: voice)
+            case .cloned(let id):
+                if let cloned = clonedVoices.first(where: { $0.id == id }) {
+                    task = DubbingTask(srtURL: srtURL, voice: .adam)
+                    task.clonedVoiceRef = cloned.audioURL
+                    task.clonedVoiceName = cloned.name
+                } else {
+                    task = DubbingTask(srtURL: srtURL, voice: .adam)
+                }
+            }
+        }
         currentDubbingTask = task
         selectedSidebarItem = .dubbing
         dubbingService.start(task)
@@ -214,6 +327,209 @@ final class AppViewModel: ObservableObject {
 
     func resetDubbing() {
         currentDubbingTask = nil
+    }
+
+    // MARK: - Clone Voice
+
+    func pickCloneAudioFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio, .mp3, .wav]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Chọn file audio mẫu (3-8 giây)"
+
+        if panel.runModal() == .OK {
+            cloneRefAudioURL = panel.url
+        }
+    }
+
+    func cloneVoice() {
+        guard let refURL = cloneRefAudioURL else { return }
+        let name = cloneVoiceName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+
+        isCloning = true
+        cloneStatusMessage = "Đang clone giọng nói..."
+
+        guard let python = SystemEnvironment.shared.resolvePython() else {
+            cloneStatusMessage = "Lỗi: Không tìm thấy Python3"
+            isCloning = false
+            return
+        }
+
+        // Copy audio ref vào thư mục app support để lưu lâu dài
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MyMacTool/ClonedVoices", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let destAudio = appSupport.appendingPathComponent("\(UUID().uuidString)_\(refURL.lastPathComponent)")
+        try? FileManager.default.copyItem(at: refURL, to: destAudio)
+
+        // Test clone bằng VieNeu để verify
+        let scriptFile = FileManager.default.temporaryDirectory.appendingPathComponent("clone_test.py")
+        let testOutput = FileManager.default.temporaryDirectory.appendingPathComponent("clone_test.wav")
+
+        let script = """
+        from vieneu import Vieneu
+        vieneu = Vieneu()
+        # Test clone — nếu file audio hợp lệ sẽ tạo được audio
+        audio = vieneu.infer("Xin chào, giọng nói đã được clone thành công.", ref_audio=r"\(destAudio.path)")
+        vieneu.save(audio, r"\(testOutput.path)")
+        print("OK")
+        """
+
+        try? script.write(to: scriptFile, atomically: true, encoding: .utf8)
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: python)
+            process.arguments = [scriptFile.path]
+
+            var env = ProcessInfo.processInfo.environment
+            let currentPath = env["PATH"] ?? ""
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(currentPath)"
+            process.environment = env
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+                try? FileManager.default.removeItem(at: scriptFile)
+                // Giữ testOutput làm preview audio (sẽ xóa sau khi user quyết định)
+
+                await MainActor.run {
+                    if process.terminationStatus == 0 {
+                        // Không add ngay — cho user nghe thử trước
+                        let cloned = ClonedVoice(name: name, audioURL: destAudio)
+                        self.pendingClonedVoice = cloned
+                        self.clonePreviewAudioURL = testOutput
+                        self.clonePreviewReady = true
+                        self.cloneStatusMessage = "Clone thành công! Nghe thử rồi quyết định thêm vào danh sách."
+                    } else {
+                        let errData = pipe.fileHandleForReading.readDataToEndOfFile()
+                        let errMsg = String(data: errData, encoding: .utf8) ?? ""
+                        print("❌ Clone voice failed: \(errMsg.suffix(300))")
+                        self.cloneStatusMessage = "Lỗi: Clone thất bại. Kiểm tra file audio (cần 3-8s, rõ giọng)."
+                        try? FileManager.default.removeItem(at: testOutput)
+                    }
+                    self.isCloning = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.cloneStatusMessage = "Lỗi: \(error.localizedDescription)"
+                    self.isCloning = false
+                }
+            }
+        }
+    }
+
+    func removeClonedVoice(_ voice: ClonedVoice) {
+        clonedVoices.removeAll { $0.id == voice.id }
+        try? FileManager.default.removeItem(at: voice.audioURL)
+        if case .cloned(let id) = dubbingVoiceSelection, id == voice.id {
+            dubbingVoiceSelection = .preset(.adam)
+        }
+        saveClonedVoices()
+    }
+
+    func playClonePreview() {
+        guard let audioURL = clonePreviewAudioURL else { return }
+        let sound = NSSound(contentsOf: audioURL, byReference: false)
+        sound?.play()
+        previewPlayer = sound
+    }
+
+    func confirmAddClonedVoice() {
+        guard let cloned = pendingClonedVoice else { return }
+        clonedVoices.append(cloned)
+        dubbingVoiceSelection = .cloned(cloned.id)
+        cloneStatusMessage = "Đã thêm giọng \"\(cloned.name)\" vào danh sách!"
+        cloneVoiceName = ""
+        clonePreviewReady = false
+        pendingClonedVoice = nil
+        // Xóa file preview tạm
+        if let previewURL = clonePreviewAudioURL {
+            try? FileManager.default.removeItem(at: previewURL)
+        }
+        clonePreviewAudioURL = nil
+        saveClonedVoices()
+    }
+
+    func discardClonePreview() {
+        // Bỏ qua — xóa file đã clone nhưng giữ lại input để clone lại
+        if let cloned = pendingClonedVoice {
+            try? FileManager.default.removeItem(at: cloned.audioURL)
+        }
+        if let previewURL = clonePreviewAudioURL {
+            try? FileManager.default.removeItem(at: previewURL)
+        }
+        pendingClonedVoice = nil
+        clonePreviewAudioURL = nil
+        clonePreviewReady = false
+        cloneStatusMessage = "Đã bỏ qua. Bạn có thể clone lại."
+    }
+
+    // Persist cloned voices
+    private func saveClonedVoices() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MyMacTool", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        let url = appSupport.appendingPathComponent("cloned_voices.json")
+        if let data = try? JSONEncoder().encode(clonedVoices) {
+            try? data.write(to: url)
+        }
+    }
+
+    private func loadClonedVoices() {
+        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MyMacTool/cloned_voices.json")
+        if let data = try? Data(contentsOf: url),
+           let voices = try? JSONDecoder().decode([ClonedVoice].self, from: data) {
+            clonedVoices = voices.filter { FileManager.default.fileExists(atPath: $0.audioPath) }
+        }
+    }
+
+    // MARK: - Dubbing History
+
+    func addDubbingHistoryItem(srtName: String, voiceLabel: String, success: Bool, outputPath: String? = nil) {
+        let item = DubbingHistoryItem(srtName: srtName, voiceLabel: voiceLabel, success: success, outputPath: outputPath)
+        dubbingHistory.insert(item, at: 0) // Mới nhất lên đầu
+        if dubbingHistory.count > 50 { dubbingHistory = Array(dubbingHistory.prefix(50)) }
+        saveDubbingHistory()
+    }
+
+    func removeDubbingHistoryItem(_ item: DubbingHistoryItem) {
+        dubbingHistory.removeAll { $0.id == item.id }
+        saveDubbingHistory()
+    }
+
+    func clearDubbingHistory() {
+        dubbingHistory.removeAll()
+        saveDubbingHistory()
+    }
+
+    private func saveDubbingHistory() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MyMacTool", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        let url = appSupport.appendingPathComponent("dubbing_history.json")
+        if let data = try? JSONEncoder().encode(dubbingHistory) {
+            try? data.write(to: url)
+        }
+    }
+
+    private func loadDubbingHistory() {
+        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MyMacTool/dubbing_history.json")
+        if let data = try? Data(contentsOf: url),
+           let items = try? JSONDecoder().decode([DubbingHistoryItem].self, from: data) {
+            dubbingHistory = items
+        }
     }
 
     /// Dừng audio preview đang phát
@@ -235,11 +551,7 @@ final class AppViewModel: ObservableObject {
         guard !isPreviewingVoice else { return }
         isPreviewingVoice = true
 
-        let voice = dubbingVoice
-        let rate = "+0%"
-
-        // Câu mẫu tiếng Việt
-        let sampleText = "Xin chào, đây là giọng đọc mẫu để bạn nghe thử trước khi lồng tiếng."
+        let voiceSelection = dubbingVoiceSelection
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
@@ -250,22 +562,41 @@ final class AppViewModel: ObservableObject {
             }
 
             let tempFile = FileManager.default.temporaryDirectory
-                .appendingPathComponent("voice_preview_\(UUID().uuidString).mp3")
+                .appendingPathComponent("voice_preview.wav")
+            let scriptFile = FileManager.default.temporaryDirectory
+                .appendingPathComponent("preview_voice.py")
 
-            let script = """
-            import asyncio
-            import edge_tts
+            let script: String
+            switch voiceSelection {
+            case .preset(let voice):
+                script = """
+                from vieneu import Vieneu
+                vieneu = Vieneu()
+                audio = vieneu.infer("Xin chào, đây là giọng đọc mẫu để bạn nghe thử trước khi lồng tiếng.", voice="\(voice.voiceName)")
+                vieneu.save(audio, r"\(tempFile.path)")
+                print("OK")
+                """
+            case .cloned(let id):
+                let refPath = await MainActor.run { self.clonedVoices.first(where: { $0.id == id })?.audioPath ?? "" }
+                script = """
+                from vieneu import Vieneu
+                vieneu = Vieneu()
+                audio = vieneu.infer("Xin chào, đây là giọng đọc mẫu để bạn nghe thử trước khi lồng tiếng.", ref_audio=r"\(refPath)")
+                vieneu.save(audio, r"\(tempFile.path)")
+                print("OK")
+                """
+            }
 
-            async def main():
-                communicate = edge_tts.Communicate("\(sampleText)", "\(voice.voiceName)", rate="\(rate)", pitch="\(voice.pitch)")
-                await communicate.save("\(tempFile.path)")
-
-            asyncio.run(main())
-            """
+            try? script.write(to: scriptFile, atomically: true, encoding: .utf8)
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: python)
-            process.arguments = ["-c", script]
+            process.arguments = [scriptFile.path]
+
+            var env = ProcessInfo.processInfo.environment
+            let currentPath = env["PATH"] ?? ""
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(currentPath)"
+            process.environment = env
 
             let pipe = Pipe()
             process.standardOutput = pipe
@@ -274,6 +605,9 @@ final class AppViewModel: ObservableObject {
             do {
                 try process.run()
                 process.waitUntilExit()
+
+                // Cleanup script file
+                try? FileManager.default.removeItem(at: scriptFile)
 
                 if process.terminationStatus == 0 {
                     // Phát audio trực tiếp trong app bằng NSSound
@@ -287,6 +621,9 @@ final class AppViewModel: ObservableObject {
                     try? await Task.sleep(nanoseconds: 15_000_000_000)
                     try? FileManager.default.removeItem(at: tempFile)
                 } else {
+                    let errData = pipe.fileHandleForReading.readDataToEndOfFile()
+                    let errMsg = String(data: errData, encoding: .utf8) ?? ""
+                    print("❌ Preview voice failed: \(errMsg.suffix(300))")
                     await MainActor.run { self.isPreviewingVoice = false }
                 }
             } catch {

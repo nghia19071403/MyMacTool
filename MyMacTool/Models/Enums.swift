@@ -45,7 +45,6 @@ enum SRTOutputOption: String, CaseIterable, Identifiable {
 
 /// Nền tảng video hỗ trợ dán link tải
 enum LinkPlatform: String, CaseIterable, Identifiable {
-    case bilibili = "Bilibili"
     case douyin = "Douyin"
 
     var id: String { rawValue }
@@ -55,14 +54,12 @@ enum LinkPlatform: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .bilibili: return "play.tv.fill"
         case .douyin: return "music.note"
         }
     }
 
     var placeholder: String {
         switch self {
-        case .bilibili: return "Dán link video Bilibili vào đây..."
         case .douyin: return "Dán link Douyin vào đây (v.douyin.com/xxxxx)..."
         }
     }

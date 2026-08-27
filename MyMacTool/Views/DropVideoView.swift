@@ -55,6 +55,37 @@ struct DropVideoView: View {
                     .foregroundStyle(.tertiary)
             }
 
+            // OpenAI API key cho dịch chất lượng cao
+            VStack(spacing: 6) {
+                HStack {
+                    Image(systemName: "sparkles")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Text("Dịch bằng OpenAI (tùy chọn):")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    SecureField("Dán OpenAI API key (sk-...)", text: $vm.openaiAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 250)
+
+                    Picker("", selection: $vm.openaiModel) {
+                        Text("gpt-4o-mini").tag("gpt-4o-mini")
+                        Text("gpt-4o").tag("gpt-4o")
+                        Text("gpt-4.1-mini").tag("gpt-4.1-mini")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 130)
+                }
+
+                Text(vm.openaiAPIKey.isEmpty ? "Để trống = dùng Google/MyMemory miễn phí" : "✅ Sẽ ưu tiên dịch bằng OpenAI")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.top, 4)
+
             Button("Chọn video...") {
                 vm.showingFileImporter = true
             }
