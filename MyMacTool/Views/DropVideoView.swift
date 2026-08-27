@@ -91,6 +91,53 @@ struct DropVideoView: View {
             }
             .buttonStyle(.bordered)
             .padding(.top, 4)
+
+            // Danh sách video tasks — hiển thị bên dưới (giống tab Douyin)
+            if !vm.tasks.isEmpty {
+                Divider().frame(maxWidth: 500)
+
+                // Thanh nút điều khiển chung
+                HStack(spacing: 12) {
+                    Text("\(vm.tasks.count) video")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button {
+                        vm.startAllTasks()
+                    } label: {
+                        Label("Chạy tất cả", systemImage: "play.fill").font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button(role: .destructive) {
+                        vm.stopAll()
+                    } label: {
+                        Label("Dừng tất cả", systemImage: "stop.fill").font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!vm.hasActiveTasks)
+                }
+                .frame(maxWidth: 500)
+
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(vm.tasks) { task in
+                            VideoTaskRow(
+                                task: task,
+                                onStart: { vm.startTask(task) },
+                                onStop: { vm.transcriptionService.cancel(task) },
+                                onClose: { vm.closeTask(task) }
+                            )
+                            Divider()
+                        }
+                    }
+                }
+                .frame(maxWidth: 500, maxHeight: 220)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

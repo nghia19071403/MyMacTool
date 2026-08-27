@@ -168,7 +168,7 @@ final class TranscriptionService: ObservableObject {
         process.arguments = ["-c", script, task.url.path, outputDirectory.path, modelName]
 
         // Dùng environment đầy đủ để Python tìm thấy packages + ffmpeg
-        var environment = SystemEnvironment.pythonEnvironment()
+        var environment = SystemEnvironment.pythonEnvironment(for: python)
         let ffmpegDir = URL(fileURLWithPath: ffmpeg).deletingLastPathComponent().path
         let currentPath = environment["PATH"] ?? ""
         environment["PATH"] = "\(ffmpegDir):\(currentPath)"
@@ -262,13 +262,12 @@ final class TranscriptionService: ObservableObject {
                     DispatchQueue.main.async {
                         guard let self else { return }
 
-                        // Nếu chỉ cần bản dịch → xóa file gốc
-                        if !srtOption.keepOriginal {
-                            try? FileManager.default.removeItem(at: srtURL)
-                        }
-
                         switch result {
                         case .success(let translatedURL):
+                            // Chỉ xóa file gốc SAU KHI dịch thành công (nếu user không cần giữ)
+                            if !srtOption.keepOriginal {
+                                try? FileManager.default.removeItem(at: srtURL)
+                            }
                             let msg = srtOption == .both
                                 ? "Hoàn tất! File SRT gốc + bản dịch tiếng Việt đã được tạo."
                                 : "Hoàn tất! File phụ đề tiếng Việt đã được tạo."
@@ -278,6 +277,7 @@ final class TranscriptionService: ObservableObject {
                             self.onSRTCreated?(translatedURL)
 
                         case .failure(let error):
+                            // Dịch lỗi → GIỮ file gốc và dùng nó để lồng tiếng
                             task.progress = 1.0
                             task.statusMessage = "SRT đã tạo. Dịch lỗi: \(error.localizedDescription)"
                             task.status = .done

@@ -111,6 +111,38 @@ final class SystemEnvironment {
         return Self.checkVieNeuInstalled(pythonPath: python)
     }
 
+    private var _vieneuPython: String?
+
+    /// Tìm Python có VieNeu-TTS (clone giọng). Ưu tiên venv chuyên dụng vì
+    /// vieneu yêu cầu Python >= 3.10 (system python thường là 3.9).
+    /// Trả về nil nếu chưa có Python 3.10+ với vieneu.
+    func resolveVieNeuPython() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        if let cached = _vieneuPython { return cached }
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // Ưu tiên venv chuyên dụng của app
+        let candidates = [
+            "\(home)/.mymactool-venv/bin/python3",
+            "\(home)/.mymactool-venv/bin/python",
+            "\(home)/whisper-env/bin/python3",
+            "/opt/homebrew/bin/python3.12",
+            "/opt/homebrew/bin/python3.11",
+            "/opt/homebrew/bin/python3.13",
+            "/opt/homebrew/bin/python3.10",
+            "/opt/homebrew/bin/python3"
+        ]
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            if Self.checkVieNeuInstalled(pythonPath: path) {
+                print("✅ Found VieNeu python:", path)
+                _vieneuPython = path
+                return path
+            }
+        }
+        print("❌ VieNeu python not found")
+        return nil
+    }
+
     func resolveYtDlp(python: String?) -> YtDlpMethod? {
         lock.lock(); defer { lock.unlock() }
         if let cached = _ytdlp { return cached }
@@ -198,7 +230,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = ["-m", "yt_dlp", "--version"]
-        process.environment = Self.pythonEnvironment()
+        process.environment = Self.pythonEnvironment(for: python)
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -217,7 +249,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-m", "whisper", "--help"]
-        process.environment = Self.pythonEnvironment()
+        process.environment = Self.pythonEnvironment(for: pythonPath)
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -235,7 +267,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-c", "import faster_whisper; print('ok')"]
-        process.environment = Self.pythonEnvironment()
+        process.environment = Self.pythonEnvironment(for: pythonPath)
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -255,7 +287,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-c", "import edge_tts; print('ok')"]
-        process.environment = Self.pythonEnvironment()
+        process.environment = Self.pythonEnvironment(for: pythonPath)
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -275,6 +307,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-c", "import vieneu; print('ok')"]
+        process.environment = Self.pythonEnvironment(for: pythonPath)
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -295,7 +328,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-m", "pip", "install", "faster-whisper"]
-        process.environment = Self.pythonEnvironment()
+        process.environment = Self.pythonEnvironment(for: pythonPath)
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -321,7 +354,7 @@ final class SystemEnvironment {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["-m", "pip", "install", "openai-whisper"]
-        process.environment = Self.pythonEnvironment()
+        process.environment = Self.pythonEnvironment(for: pythonPath)
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -347,51 +380,39 @@ final class SystemEnvironment {
     /// Trả về environment dict đầy đủ PATH + PYTHONPATH cho subprocess.
     /// Đảm bảo user site-packages và Homebrew paths luôn có mặt,
     /// kể cả khi app chạy từ Xcode/Launchpad với PATH tối giản.
-    static func pythonEnvironment() -> [String: String] {
+    /// Environment cho subprocess Python.
+    ///
+    /// QUAN TRỌNG: KHÔNG bao giờ set PYTHONPATH tới site-packages của phiên bản
+    /// Python khác — làm vậy sẽ khiến venv 3.12 nạp numpy/onnxruntime build cho
+    /// 3.9 và crash ("Error importing numpy..."). Mỗi interpreter (system python
+    /// hay venv) tự biết site-packages của chính nó qua sys.prefix / pyvenv.cfg.
+    ///
+    /// Ở đây chỉ mở rộng PATH (để tìm binary như ffmpeg) và đảm bảo HOME có mặt.
+    static func pythonEnvironment(for pythonPath: String? = nil) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
 
-        // Mở rộng PATH
+        // Mở rộng PATH — chỉ để tìm binary phụ trợ (ffmpeg, ...), không ảnh hưởng import
         let currentPath = env["PATH"] ?? "/usr/bin:/bin"
-        let extraPaths = [
-            "\(home)/whisper-env/bin",
+        var extraPaths = [
             "/opt/homebrew/bin",
             "/usr/local/bin",
-            "\(home)/Library/Python/3.9/bin",
-            "\(home)/Library/Python/3.10/bin",
-            "\(home)/Library/Python/3.11/bin",
-            "\(home)/Library/Python/3.12/bin",
-            "\(home)/Library/Python/3.13/bin",
             "\(home)/.local/bin"
         ]
+        // Nếu biết python cụ thể, đưa thư mục bin của nó lên đầu PATH
+        if let pythonPath {
+            let binDir = (pythonPath as NSString).deletingLastPathComponent
+            extraPaths.insert(binDir, at: 0)
+        }
         env["PATH"] = (extraPaths + [currentPath]).joined(separator: ":")
 
-        // Đảm bảo Python thấy user site-packages
-        let userSitePackages = [
-            "\(home)/whisper-env/lib/python3.14/site-packages",
-            "\(home)/whisper-env/lib/python3.13/site-packages",
-            "\(home)/whisper-env/lib/python3.12/site-packages",
-            "\(home)/whisper-env/lib/python3.11/site-packages",
-            "\(home)/Library/Python/3.9/lib/python/site-packages",
-            "\(home)/Library/Python/3.10/lib/python/site-packages",
-            "\(home)/Library/Python/3.11/lib/python/site-packages",
-            "\(home)/Library/Python/3.12/lib/python/site-packages",
-            "\(home)/Library/Python/3.13/lib/python/site-packages"
-        ].filter { FileManager.default.fileExists(atPath: $0) }
-
-        if !userSitePackages.isEmpty {
-            let existing = env["PYTHONPATH"] ?? ""
-            let allPaths = userSitePackages + (existing.isEmpty ? [] : [existing])
-            env["PYTHONPATH"] = allPaths.joined(separator: ":")
-        }
+        // Xóa PYTHONPATH kế thừa để tránh nạp nhầm site-packages cross-version
+        env.removeValue(forKey: "PYTHONPATH")
 
         // Đảm bảo HOME được set (sandbox có thể thiếu)
         if env["HOME"] == nil {
             env["HOME"] = home
         }
-
-        // Không disable user site-packages
-        env["PYTHONNOUSERSITE"] = nil
 
         return env
     }

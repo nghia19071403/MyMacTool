@@ -27,24 +27,14 @@ struct MainContentView: View {
     var body: some View {
         VStack(spacing: 0) {
 
-            // Tab bar chỉ hiện khi ở tab "Kéo file" và có video
-            if vm.selectedSidebarItem == .localFile, !vm.tasks.isEmpty {
-                TabBarView(vm: vm)
-                Divider()
-            }
-
             Group {
-                if let selected = vm.selectedTask {
-                    TaskDetailView(task: selected, vm: vm)
-                } else {
-                    switch vm.selectedSidebarItem {
-                    case .platform(let platform):
-                        LinkInputView(platform: platform, vm: vm)
-                    case .localFile:
-                        DropVideoView(vm: vm)
-                    case .dubbing:
-                        DubbingView(vm: vm)
-                    }
+                switch vm.selectedSidebarItem {
+                case .platform(let platform):
+                    LinkInputView(platform: platform, vm: vm)
+                case .localFile:
+                    DropVideoView(vm: vm)
+                case .dubbing:
+                    DubbingView(vm: vm)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

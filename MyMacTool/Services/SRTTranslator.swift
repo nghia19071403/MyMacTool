@@ -317,10 +317,7 @@ final class SRTTranslator {
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = [scriptFile.path]
 
-        var env = ProcessInfo.processInfo.environment
-        let currentPath = env["PATH"] ?? ""
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(currentPath)"
-        process.environment = env
+        process.environment = SystemEnvironment.pythonEnvironment(for: python)
 
         let pipe = Pipe()
         process.standardOutput = pipe

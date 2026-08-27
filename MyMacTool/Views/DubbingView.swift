@@ -165,9 +165,47 @@ struct CloneVoiceView: View {
                             .foregroundStyle(.secondary)
                     }
                 } else if !vm.cloneStatusMessage.isEmpty {
-                    Text(vm.cloneStatusMessage)
-                        .font(.caption)
-                        .foregroundStyle(vm.cloneStatusMessage.contains("Lỗi") ? .red : .green)
+                    VStack(spacing: 10) {
+                        Text(vm.cloneStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(vm.cloneStatusMessage.contains("Lỗi") ? .red : .green)
+                            .multilineTextAlignment(.center)
+
+                        if vm.cloneStatusMessage.contains("VieNeu") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Hướng dẫn cài đặt VieNeu-TTS (cần Python 3.10+):")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                ForEach([
+                                    "1. Cài Python 3.12: brew install python@3.12",
+                                    "2. Tạo môi trường: python3.12 -m venv ~/.mymactool-venv",
+                                    "3. Cài VieNeu: ~/.mymactool-venv/bin/pip install vieneu",
+                                    "4. Mở lại app và thử clone lại"
+                                ], id: \.self) { step in
+                                    Text(step)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .padding(12)
+                            .frame(maxWidth: 420, alignment: .leading)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+
+                            Button {
+                                let cmds = "brew install python@3.12 && python3.12 -m venv ~/.mymactool-venv && ~/.mymactool-venv/bin/pip install vieneu"
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(cmds, forType: .string)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "doc.on.doc")
+                                    Text("Copy lệnh cài đặt")
+                                }
+                                .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
                 }
 
                 // Preview sau khi clone xong
@@ -249,7 +287,7 @@ struct DubbingSetupView: View {
                         .font(.title3)
                         .fontWeight(.semibold)
 
-                    Text("Kéo file SRT vào đây hoặc bấm chọn")
+                    Text("Kéo 1 hoặc nhiều file SRT vào đây (xử lý hàng loạt), hoặc bấm chọn")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
@@ -349,6 +387,46 @@ struct DubbingSetupView: View {
                 .disabled(vm.dubbingSRTURL == nil)
                 .padding(.top, 8)
 
+                // Danh sách task lồng tiếng hàng loạt (kéo nhiều file)
+                if !vm.dubbingTasks.isEmpty {
+                    Divider().frame(maxWidth: 450).padding(.top, 8)
+
+                    HStack(spacing: 12) {
+                        Text("Hàng đợi lồng tiếng (\(vm.dubbingTasks.count))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            vm.startAllDubbing()
+                        } label: {
+                            Label("Chạy tất cả", systemImage: "play.fill").font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button(role: .destructive) {
+                            vm.clearDubbingTasks()
+                        } label: {
+                            Label("Xóa hết", systemImage: "trash").font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .frame(maxWidth: 450)
+
+                    VStack(spacing: 2) {
+                        ForEach(vm.dubbingTasks) { task in
+                            DubbingTaskRow(
+                                task: task,
+                                onCancel: { vm.cancelDubbingTask(task) },
+                                onRemove: { vm.removeDubbingTask(task) }
+                            )
+                            Divider()
+                        }
+                    }
+                    .frame(maxWidth: 450)
+                }
+
                 // Lịch sử lồng tiếng
                 if !vm.dubbingHistory.isEmpty {
                     Divider().frame(maxWidth: 450).padding(.top, 12)
@@ -412,12 +490,30 @@ struct DubbingSetupView: View {
     }
 
     private func handleSRTDrop(_ providers: [NSItemProvider]) -> Bool {
+        let group = DispatchGroup()
+        var urls: [URL] = []
+        let lock = NSLock()
+
         for provider in providers {
+            group.enter()
             provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url, url.pathExtension.lowercased() == "srt" else { return }
-                DispatchQueue.main.async {
-                    vm.dubbingSRTURL = url
+                if let url, url.pathExtension.lowercased() == "srt" {
+                    lock.lock()
+                    urls.append(url)
+                    lock.unlock()
                 }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) {
+            guard !urls.isEmpty else { return }
+            if urls.count == 1 {
+                // 1 file → giữ luồng chọn giọng như cũ
+                vm.dubbingSRTURL = urls[0]
+            } else {
+                // Nhiều file → tạo hàng loạt task
+                vm.addDubbingTasks(urls)
             }
         }
         return true

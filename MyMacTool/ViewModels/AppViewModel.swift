@@ -123,6 +123,8 @@ final class AppViewModel: ObservableObject {
     @Published var dubbingVoice: DubbingVoice = .adam
     @Published var dubbingVoiceSelection: VoiceSelection = .preset(.adam)
     @Published var currentDubbingTask: DubbingTask?
+    /// Danh sách nhiều task lồng tiếng (kéo nhiều file SRT). Chạy tuần tự.
+    @Published var dubbingTasks: [DubbingTask] = []
     @Published var isPreviewingVoice: Bool = false
 
     // Clone voice
@@ -262,17 +264,82 @@ final class AppViewModel: ObservableObject {
         panel.allowedContentTypes = [
             UTType(filenameExtension: "srt") ?? .plainText
         ]
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.message = "Chọn file phụ đề SRT"
+        panel.message = "Chọn file phụ đề SRT (có thể chọn nhiều)"
 
         if panel.runModal() == .OK {
-            dubbingSRTURL = panel.url
+            let urls = panel.urls
+            if urls.count == 1 {
+                dubbingSRTURL = urls.first
+            } else if urls.count > 1 {
+                addDubbingTasks(urls)
+            }
         }
     }
 
+    /// Tạo task lồng tiếng cho nhiều file SRT và chạy tuần tự.
+    func addDubbingTasks(_ urls: [URL]) {
+        let srtURLs = urls.filter { $0.pathExtension.lowercased() == "srt" }
+        guard !srtURLs.isEmpty else { return }
+
+        for url in srtURLs {
+            let resolved = Self.resolveVietnameseSRT(url)
+            // Tránh trùng
+            if dubbingTasks.contains(where: { $0.srtURL == resolved }) { continue }
+
+            let task = makeDubbingTask(srtURL: resolved)
+            dubbingTasks.append(task)
+            dubbingService.enqueue(task)
+        }
+        // Chuyển sang chế độ danh sách
+        currentDubbingTask = nil
+    }
+
+    /// Tạo 1 DubbingTask theo giọng đang chọn (preset hoặc clone).
+    private func makeDubbingTask(srtURL: URL) -> DubbingTask {
+        let task: DubbingTask
+        switch dubbingVoiceSelection {
+        case .preset(let voice):
+            task = DubbingTask(srtURL: srtURL, voice: voice)
+        case .cloned(let id):
+            if let cloned = clonedVoices.first(where: { $0.id == id }) {
+                task = DubbingTask(srtURL: srtURL, voice: .adam)
+                task.clonedVoiceRef = cloned.audioURL
+                task.clonedVoiceName = cloned.name
+            } else {
+                task = DubbingTask(srtURL: srtURL, voice: .adam)
+            }
+        }
+        return task
+    }
+
+    func cancelDubbingTask(_ task: DubbingTask) {
+        dubbingService.cancel(task)
+    }
+
+    func removeDubbingTask(_ task: DubbingTask) {
+        dubbingService.cancel(task)
+        dubbingTasks.removeAll { $0.id == task.id }
+    }
+
+    func startAllDubbing() {
+        for task in dubbingTasks where !task.status.isActive && task.status != .done {
+            dubbingService.enqueue(task)
+        }
+    }
+
+    func clearDubbingTasks() {
+        for task in dubbingTasks where task.status.isActive {
+            dubbingService.cancel(task)
+        }
+        dubbingTasks.removeAll()
+    }
+
     func startDubbing() {
-        guard let srtURL = dubbingSRTURL else { return }
+        guard let picked = dubbingSRTURL else { return }
+        // VieNeu-TTS chỉ đọc tiếng Việt → ưu tiên file _vi.srt nếu có
+        let srtURL = Self.resolveVietnameseSRT(picked)
 
         let task: DubbingTask
         switch dubbingVoiceSelection {
@@ -289,6 +356,19 @@ final class AppViewModel: ObservableObject {
         }
         currentDubbingTask = task
         dubbingService.start(task)
+    }
+
+    /// Nếu file SRT được chọn là bản gốc và tồn tại bản dịch "<name>_vi.srt"
+    /// cùng thư mục thì dùng bản dịch (vì VieNeu chỉ đọc tiếng Việt).
+    static func resolveVietnameseSRT(_ url: URL) -> URL {
+        let name = url.deletingPathExtension().lastPathComponent
+        if name.hasSuffix("_vi") { return url }  // đã là bản dịch
+        let viURL = url.deletingLastPathComponent()
+            .appendingPathComponent("\(name)_vi.srt")
+        if FileManager.default.fileExists(atPath: viURL.path) {
+            return viURL
+        }
+        return url
     }
 
     /// Auto-trigger: gọi sau khi tạo SRT xong để tự động lồng tiếng
@@ -351,8 +431,8 @@ final class AppViewModel: ObservableObject {
         isCloning = true
         cloneStatusMessage = "Đang clone giọng nói..."
 
-        guard let python = SystemEnvironment.shared.resolvePython() else {
-            cloneStatusMessage = "Lỗi: Không tìm thấy Python3"
+        guard let python = SystemEnvironment.shared.resolveVieNeuPython() else {
+            cloneStatusMessage = "Lỗi: Chưa cài VieNeu-TTS (cần Python 3.10+). Xem hướng dẫn cài đặt."
             isCloning = false
             return
         }
@@ -387,10 +467,7 @@ final class AppViewModel: ObservableObject {
             process.executableURL = URL(fileURLWithPath: python)
             process.arguments = [scriptFile.path]
 
-            var env = ProcessInfo.processInfo.environment
-            let currentPath = env["PATH"] ?? ""
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(currentPath)"
-            process.environment = env
+            process.environment = SystemEnvironment.pythonEnvironment(for: python)
 
             let pipe = Pipe()
             process.standardOutput = pipe
