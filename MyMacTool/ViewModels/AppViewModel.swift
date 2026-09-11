@@ -14,6 +14,7 @@ final class AppViewModel: ObservableObject {
 
     let transcriptionService = TranscriptionService()
     let dubbingService = DubbingService.shared
+    let voiceStudioService = VoiceStudioService.shared
 
     // MARK: - Init
 
@@ -51,6 +52,26 @@ final class AppViewModel: ObservableObject {
                 self?.sendNotification(title: "Lồng tiếng thất bại ❌", body: task.srtDisplayName)
             }
         }
+        // VoiceStudio: lưu lịch sử khi task xong
+        voiceStudioService.onTaskCompleted = { [weak self] task, success, outputPath in
+            self?.addDubbingHistoryItem(
+                srtName: task.srtDisplayName,
+                voiceLabel: "VoiceStudio · \(task.voice)",
+                success: success,
+                outputPath: outputPath
+            )
+            if success {
+                self?.sendNotification(title: "VoiceStudio hoàn tất ✅", body: "\(task.srtDisplayName) — giọng \(task.voice)")
+            } else {
+                self?.sendNotification(title: "VoiceStudio thất bại ❌", body: task.srtDisplayName)
+            }
+        }
+
+        // Load cấu hình VoiceStudio đã lưu
+        voiceStudioBaseURL = UserDefaults.standard.string(forKey: "voicestudio_base_url") ?? "http://127.0.0.1:8000"
+        voiceStudioModel = UserDefaults.standard.string(forKey: "voicestudio_model") ?? "tts-1"
+        voiceStudioVoice = UserDefaults.standard.string(forKey: "voicestudio_voice") ?? "alloy"
+
         // Load OpenAI key đã lưu
         openaiAPIKey = UserDefaults.standard.string(forKey: "openai_api_key") ?? ""
         openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o-mini"
@@ -138,6 +159,34 @@ final class AppViewModel: ObservableObject {
     // History
     @Published var dubbingHistory: [DubbingHistoryItem] = []
 
+    // MARK: - State: VoiceStudio (tab riêng)
+
+    @Published var voiceStudioSRTURL: URL?
+    @Published var voiceStudioTasks: [VoiceStudioTask] = []
+    @Published var currentVoiceStudioTask: VoiceStudioTask?
+
+    /// Cấu hình kết nối VoiceStudio server
+    @Published var voiceStudioBaseURL: String = "http://127.0.0.1:8000" {
+        didSet {
+            voiceStudioService.baseURL = voiceStudioBaseURL
+            UserDefaults.standard.set(voiceStudioBaseURL, forKey: "voicestudio_base_url")
+        }
+    }
+    @Published var voiceStudioModel: String = "tts-1" {
+        didSet {
+            voiceStudioService.model = voiceStudioModel
+            UserDefaults.standard.set(voiceStudioModel, forKey: "voicestudio_model")
+        }
+    }
+    @Published var voiceStudioVoice: String = "alloy" {
+        didSet { UserDefaults.standard.set(voiceStudioVoice, forKey: "voicestudio_voice") }
+    }
+
+    /// Trạng thái kiểm tra kết nối server
+    @Published var voiceStudioServerOnline: Bool = false
+    @Published var voiceStudioServerMessage: String = "Chưa kiểm tra"
+    @Published var isCheckingVoiceStudioServer: Bool = false
+
     // Tạm giữ data clone chờ user confirm
     private var pendingClonedVoice: ClonedVoice?
     private var clonePreviewAudioURL: URL?
@@ -169,6 +218,9 @@ final class AppViewModel: ObservableObject {
             return tasks.contains { $0.status.isActive }
         case .dubbing:
             return currentDubbingTask?.status.isActive == true
+        case .voiceStudio:
+            return currentVoiceStudioTask?.status.isActive == true
+                || voiceStudioTasks.contains { $0.status.isActive }
         }
     }
 
@@ -407,6 +459,102 @@ final class AppViewModel: ObservableObject {
 
     func resetDubbing() {
         currentDubbingTask = nil
+    }
+
+    // MARK: - VoiceStudio
+
+    /// Đồng bộ cấu hình xuống service (gọi khi mở tab hoặc khi cần chắc chắn).
+    func syncVoiceStudioConfig() {
+        voiceStudioService.baseURL = voiceStudioBaseURL
+        voiceStudioService.model = voiceStudioModel
+    }
+
+    /// Kiểm tra VoiceStudio server có đang chạy không.
+    func checkVoiceStudioServer() {
+        isCheckingVoiceStudioServer = true
+        voiceStudioServerMessage = "Đang kiểm tra..."
+        voiceStudioService.checkServer(baseURL: voiceStudioBaseURL) { [weak self] online, message in
+            self?.voiceStudioServerOnline = online
+            self?.voiceStudioServerMessage = message
+            self?.isCheckingVoiceStudioServer = false
+        }
+    }
+
+    func pickVoiceStudioSRTFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "srt") ?? .plainText]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.message = "Chọn file phụ đề SRT (có thể chọn nhiều)"
+
+        if panel.runModal() == .OK {
+            let urls = panel.urls.filter { $0.pathExtension.lowercased() == "srt" }
+            if urls.count == 1 {
+                voiceStudioSRTURL = urls.first
+            } else if urls.count > 1 {
+                addVoiceStudioTasks(urls)
+            }
+        }
+    }
+
+    /// Bắt đầu lồng tiếng 1 file SRT qua VoiceStudio.
+    func startVoiceStudio() {
+        guard let picked = voiceStudioSRTURL else { return }
+        syncVoiceStudioConfig()
+        // Ưu tiên bản dịch tiếng Việt nếu có (dùng chung helper với dubbing)
+        let srtURL = Self.resolveVietnameseSRT(picked)
+        let task = VoiceStudioTask(srtURL: srtURL, voice: voiceStudioVoice)
+        currentVoiceStudioTask = task
+        voiceStudioService.start(task)
+    }
+
+    /// Tạo hàng loạt task VoiceStudio (kéo nhiều file), chạy tuần tự.
+    func addVoiceStudioTasks(_ urls: [URL]) {
+        let srtURLs = urls.filter { $0.pathExtension.lowercased() == "srt" }
+        guard !srtURLs.isEmpty else { return }
+        syncVoiceStudioConfig()
+
+        for url in srtURLs {
+            let resolved = Self.resolveVietnameseSRT(url)
+            if voiceStudioTasks.contains(where: { $0.srtURL == resolved }) { continue }
+            let task = VoiceStudioTask(srtURL: resolved, voice: voiceStudioVoice)
+            voiceStudioTasks.append(task)
+            voiceStudioService.enqueue(task)
+        }
+        currentVoiceStudioTask = nil
+    }
+
+    func startAllVoiceStudio() {
+        syncVoiceStudioConfig()
+        for task in voiceStudioTasks where !task.status.isActive && task.status != .done {
+            task.isCancelled = false
+            voiceStudioService.enqueue(task)
+        }
+    }
+
+    func cancelVoiceStudioTask(_ task: VoiceStudioTask) {
+        voiceStudioService.cancel(task)
+    }
+
+    func removeVoiceStudioTask(_ task: VoiceStudioTask) {
+        voiceStudioService.cancel(task)
+        voiceStudioTasks.removeAll { $0.id == task.id }
+    }
+
+    func clearVoiceStudioTasks() {
+        for task in voiceStudioTasks where task.status.isActive {
+            voiceStudioService.cancel(task)
+        }
+        voiceStudioTasks.removeAll()
+    }
+
+    func cancelVoiceStudio() {
+        guard let task = currentVoiceStudioTask else { return }
+        voiceStudioService.cancel(task)
+    }
+
+    func resetVoiceStudio() {
+        currentVoiceStudioTask = nil
     }
 
     // MARK: - Clone Voice

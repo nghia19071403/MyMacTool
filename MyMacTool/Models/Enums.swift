@@ -72,9 +72,10 @@ enum SidebarItem: Hashable, Identifiable, CaseIterable {
     case platform(LinkPlatform)
     case localFile
     case dubbing
+    case voiceStudio
 
     static var allCases: [SidebarItem] {
-        LinkPlatform.allCases.map { .platform($0) } + [.localFile, .dubbing]
+        LinkPlatform.allCases.map { .platform($0) } + [.localFile, .dubbing, .voiceStudio]
     }
 
     var id: String {
@@ -82,6 +83,7 @@ enum SidebarItem: Hashable, Identifiable, CaseIterable {
         case .platform(let p): return p.id
         case .localFile: return "localFile"
         case .dubbing: return "dubbing"
+        case .voiceStudio: return "voiceStudio"
         }
     }
 
@@ -90,6 +92,7 @@ enum SidebarItem: Hashable, Identifiable, CaseIterable {
         case .platform(let p): return p.rawValue
         case .localFile: return "Kéo file"
         case .dubbing: return "Lồng tiếng"
+        case .voiceStudio: return "VoiceStudio"
         }
     }
 
@@ -98,6 +101,7 @@ enum SidebarItem: Hashable, Identifiable, CaseIterable {
         case .platform(let p): return p.icon
         case .localFile: return "folder.badge.plus"
         case .dubbing: return "waveform.circle.fill"
+        case .voiceStudio: return "speaker.wave.3.fill"
         }
     }
 }
