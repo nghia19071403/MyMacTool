@@ -59,10 +59,35 @@ final class AppViewModel: ObservableObject {
         loadClonedVoices()
         loadDubbingHistory()
 
-        // Nếu có giọng clone → mặc định chọn giọng clone đầu tiên
-        if let firstClone = clonedVoices.first {
+        // Khôi phục lựa chọn giọng đã lưu (giữ cố định đến khi user đổi).
+        restoreVoiceSelection()
+    }
+
+    // MARK: - Voice Selection Persistence
+
+    /// Khôi phục giọng đã chọn từ lần trước. Nếu không có → mặc định clone đầu tiên (nếu có).
+    private func restoreVoiceSelection() {
+        let saved = UserDefaults.standard.string(forKey: "dubbing_voice_selection") ?? ""
+        if saved.hasPrefix("cloned:"),
+           let uuid = UUID(uuidString: String(saved.dropFirst("cloned:".count))),
+           clonedVoices.contains(where: { $0.id == uuid }) {
+            dubbingVoiceSelection = .cloned(uuid)
+        } else if saved.hasPrefix("preset:"),
+                  let voice = DubbingVoice(rawValue: String(saved.dropFirst("preset:".count))) {
+            dubbingVoiceSelection = .preset(voice)
+        } else if let firstClone = clonedVoices.first {
             dubbingVoiceSelection = .cloned(firstClone.id)
         }
+    }
+
+    /// Lưu lựa chọn giọng hiện tại. Gọi mỗi khi user đổi trong dropdown.
+    func saveVoiceSelection() {
+        let value: String
+        switch dubbingVoiceSelection {
+        case .preset(let voice): value = "preset:\(voice.rawValue)"
+        case .cloned(let id): value = "cloned:\(id.uuidString)"
+        }
+        UserDefaults.standard.set(value, forKey: "dubbing_voice_selection")
     }
 
     // MARK: - Notification
@@ -121,7 +146,9 @@ final class AppViewModel: ObservableObject {
 
     @Published var dubbingSRTURL: URL?
     @Published var dubbingVoice: DubbingVoice = .adam
-    @Published var dubbingVoiceSelection: VoiceSelection = .preset(.adam)
+    @Published var dubbingVoiceSelection: VoiceSelection = .preset(.adam) {
+        didSet { saveVoiceSelection() }
+    }
     @Published var currentDubbingTask: DubbingTask?
     /// Danh sách nhiều task lồng tiếng (kéo nhiều file SRT). Chạy tuần tự.
     @Published var dubbingTasks: [DubbingTask] = []
@@ -340,20 +367,7 @@ final class AppViewModel: ObservableObject {
         guard let picked = dubbingSRTURL else { return }
         // VieNeu-TTS chỉ đọc tiếng Việt → ưu tiên file _vi.srt nếu có
         let srtURL = Self.resolveVietnameseSRT(picked)
-
-        let task: DubbingTask
-        switch dubbingVoiceSelection {
-        case .preset(let voice):
-            task = DubbingTask(srtURL: srtURL, voice: voice)
-        case .cloned(let id):
-            if let cloned = clonedVoices.first(where: { $0.id == id }) {
-                task = DubbingTask(srtURL: srtURL, voice: .adam)
-                task.clonedVoiceRef = cloned.audioURL
-                task.clonedVoiceName = cloned.name
-            } else {
-                task = DubbingTask(srtURL: srtURL, voice: .adam)
-            }
-        }
+        let task = makeDubbingTask(srtURL: srtURL)
         currentDubbingTask = task
         dubbingService.start(task)
     }
@@ -371,30 +385,11 @@ final class AppViewModel: ObservableObject {
         return url
     }
 
-    /// Auto-trigger: gọi sau khi tạo SRT xong để tự động lồng tiếng
-    /// Ưu tiên dùng giọng clone đầu tiên, nếu không có thì dùng giọng đang chọn
+    /// Auto-trigger: gọi sau khi tạo SRT xong để tự động lồng tiếng.
+    /// Dùng đúng giọng user đang chọn (dubbingVoiceSelection) — giữ cố định
+    /// cho tới khi user đổi trong dropdown.
     func autoDubAfterSRT(srtURL: URL) {
-        let task: DubbingTask
-        if let firstClone = clonedVoices.first {
-            // Ưu tiên giọng clone
-            task = DubbingTask(srtURL: srtURL, voice: .adam)
-            task.clonedVoiceRef = firstClone.audioURL
-            task.clonedVoiceName = firstClone.name
-        } else {
-            // Fallback giọng preset đang chọn
-            switch dubbingVoiceSelection {
-            case .preset(let voice):
-                task = DubbingTask(srtURL: srtURL, voice: voice)
-            case .cloned(let id):
-                if let cloned = clonedVoices.first(where: { $0.id == id }) {
-                    task = DubbingTask(srtURL: srtURL, voice: .adam)
-                    task.clonedVoiceRef = cloned.audioURL
-                    task.clonedVoiceName = cloned.name
-                } else {
-                    task = DubbingTask(srtURL: srtURL, voice: .adam)
-                }
-            }
-        }
+        let task = makeDubbingTask(srtURL: srtURL)
         currentDubbingTask = task
         selectedSidebarItem = .dubbing
         dubbingService.start(task)

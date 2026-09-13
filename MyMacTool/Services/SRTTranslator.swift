@@ -49,21 +49,33 @@ final class SRTTranslator {
             let originalName = srtURL.deletingPathExtension().lastPathComponent
             let outputURL = srtURL.deletingLastPathComponent().appendingPathComponent("\(originalName)_vi.srt")
 
-            let success = self.runTranslateScript(
-                python: python,
-                srtPath: srtURL.path,
-                outputPath: outputURL.path,
-                openaiKey: self.openaiAPIKey,
-                openaiModel: self.openaiModel,
-                onProgress: onProgress
-            )
+            // Retry toàn bộ tối đa 3 lần nếu tất cả engine fail (phòng lỗi mạng tạm thời)
+            let maxAttempts = 3
+            var success = false
+            for attempt in 1...maxAttempts {
+                if attempt > 1 {
+                    DispatchQueue.main.async {
+                        onProgress(-1, "Dịch lỗi, đang thử lại (lần \(attempt)/\(maxAttempts))...")
+                    }
+                    Thread.sleep(forTimeInterval: Double(attempt) * 2.0) // backoff 2s, 4s
+                }
+                success = self.runTranslateScript(
+                    python: python,
+                    srtPath: srtURL.path,
+                    outputPath: outputURL.path,
+                    openaiKey: self.openaiAPIKey,
+                    openaiModel: self.openaiModel,
+                    onProgress: onProgress
+                )
+                if success { break }
+            }
 
             DispatchQueue.main.async {
                 if success {
                     onProgress(1.0, "Dịch xong!")
                     completion(.success(outputURL))
                 } else {
-                    completion(.failure(SimpleError(message: "Tất cả engine dịch đều thất bại.")))
+                    completion(.failure(SimpleError(message: "Tất cả engine dịch đều thất bại (đã thử \(maxAttempts) lần).")))
                 }
             }
         }
@@ -106,6 +118,30 @@ final class SRTTranslator {
                 text = '\\n'.join(lines[2:]).strip()
                 segments.append({'index': index, 'timestamp': timestamp, 'text': text})
             return segments
+
+        # --- Helper: retry 1 câu với exponential backoff ---
+        # Trả về (text_dịch, is_fatal). is_fatal=True => lỗi nghiêm trọng (quota/blocked) → fallback engine.
+        def translate_one(fn, text, max_retries=3):
+            if not text.strip():
+                return text, False
+            delay = 1.0
+            for attempt in range(max_retries):
+                try:
+                    r = fn(text)
+                    if r and r.strip():
+                        return r, False
+                    # Kết quả rỗng → thử lại
+                except Exception as e:
+                    err = str(e).lower()
+                    # Lỗi nghiêm trọng → không retry, báo fatal để chuyển engine
+                    if 'quota' in err or 'blocked' in err or '403' in err:
+                        return None, True
+                    # Rate-limit / mạng → retry sau delay
+                    if attempt < max_retries - 1:
+                        time.sleep(delay)
+                        delay *= 2  # backoff: 1s, 2s, 4s
+                        continue
+            return None, False  # hết retry mà vẫn fail (không fatal)
 
         # --- Engine 1: OpenAI GPT ---
         def translate_openai(texts):
@@ -178,35 +214,50 @@ final class SRTTranslator {
                 print(f"[warn] OpenAI exception: {str(e)[:80]}", flush=True)
                 return None
 
-        # --- Engine 2: Google Translate ---
+        # --- Engine: Google Translate ---
         def translate_google(texts):
             print("[engine] 🔵 Đang dùng: Google Translate", flush=True)
             try:
                 from deep_translator import GoogleTranslator
                 translator = GoogleTranslator(source='zh-CN', target='vi')
-                results = []
-                consecutive_fail = 0
-                for i, text in enumerate(texts):
+
+                # Kiểm tra nhanh 1 câu: nếu Google không dịch được (đang hỏng) → bỏ ngay
+                probe_ok = False
+                for t in texts:
+                    if not t.strip():
+                        continue
                     try:
-                        translated = translator.translate(text)
-                        if translated:
-                            results.append(translated)
-                            consecutive_fail = 0
-                        else:
-                            results.append(text)
+                        r = translator.translate(t)
+                        if r and r.strip() and r.strip() != t.strip():
+                            probe_ok = True
+                        break
                     except Exception as e:
-                        err = str(e).lower()
-                        # Nếu bị chặn/rate-limit nhiều lần liên tiếp → fallback
-                        if '429' in err or 'rate' in err or 'too many' in err or 'blocked' in err:
-                            consecutive_fail += 1
-                            if consecutive_fail >= 3:
-                                print(f"[warn] Google bị chặn liên tục tại câu {i+1}, chuyển engine", flush=True)
-                                return None
+                        print(f"[warn] Google probe lỗi: {str(e)[:80]}", flush=True)
+                        break
+                if not probe_ok:
+                    print("[warn] Google không khả dụng, chuyển engine", flush=True)
+                    return None
+
+                results = []
+                fail_count = 0
+                for i, text in enumerate(texts):
+                    translated, fatal = translate_one(translator.translate, text)
+                    if fatal:
+                        print(f"[warn] Google lỗi nghiêm trọng tại câu {i+1}, chuyển engine", flush=True)
+                        return None
+                    if translated and translated.strip():
+                        results.append(translated)
+                    else:
                         results.append(text)
+                        fail_count += 1
+                    # Nếu quá nhiều câu fail (kể cả sau retry) → engine hỏng, fallback
+                    if fail_count > max(3, len(texts) // 4):
+                        print(f"[warn] Google fail {fail_count} câu, chuyển engine", flush=True)
+                        return None
                     if (i + 1) % 5 == 0:
                         progress = int((i + 1) / len(texts) * 80)
                         print(f"[progress] {min(progress, 80)}%", flush=True)
-                    time.sleep(0.6)
+                    time.sleep(0.5)
                 return results
             except Exception as e:
                 print(f"[warn] Google exception: {str(e)[:80]}", flush=True)
@@ -219,16 +270,20 @@ final class SRTTranslator {
                 from deep_translator import MyMemoryTranslator
                 translator = MyMemoryTranslator(source='zh-CN', target='vi-VN')
                 results = []
+                fail_count = 0
                 for i, text in enumerate(texts):
-                    try:
-                        translated = translator.translate(text)
-                        results.append(translated if translated else text)
-                    except Exception as e:
-                        err = str(e).lower()
-                        if 'limit' in err or '429' in err or 'quota' in err:
-                            print(f"[warn] MyMemory hết quota tại câu {i+1}", flush=True)
-                            return None
+                    translated, fatal = translate_one(translator.translate, text)
+                    if fatal:
+                        print(f"[warn] MyMemory hết quota tại câu {i+1}, chuyển engine", flush=True)
+                        return None
+                    if translated and translated.strip():
+                        results.append(translated)
+                    else:
                         results.append(text)
+                        fail_count += 1
+                    if fail_count > max(3, len(texts) // 4):
+                        print(f"[warn] MyMemory fail {fail_count} câu, chuyển engine", flush=True)
+                        return None
                     if (i + 1) % 5 == 0:
                         progress = int((i + 1) / len(texts) * 80)
                         print(f"[progress] {min(progress, 80)}%", flush=True)
@@ -276,8 +331,8 @@ final class SRTTranslator {
 
             engines = [
                 ("OpenAI GPT", translate_openai),
-                ("Google", translate_google),
                 ("MyMemory", translate_mymemory),
+                ("Google", translate_google),
                 ("Argos (offline)", translate_argos),
             ]
 
