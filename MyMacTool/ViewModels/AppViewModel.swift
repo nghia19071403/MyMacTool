@@ -53,7 +53,7 @@ final class AppViewModel: ObservableObject {
         }
         // Load OpenAI key đã lưu
         openaiAPIKey = UserDefaults.standard.string(forKey: "openai_api_key") ?? ""
-        openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o-mini"
+        openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o"
 
         // Load giọng đã clone
         loadClonedVoices()
@@ -134,7 +134,7 @@ final class AppViewModel: ObservableObject {
     @Published var openaiAPIKey: String = "" {
         didSet { SRTTranslator.shared.openaiAPIKey = openaiAPIKey }
     }
-    @Published var openaiModel: String = "gpt-4o-mini" {
+    @Published var openaiModel: String = "gpt-4o" {
         didSet { SRTTranslator.shared.openaiModel = openaiModel }
     }
 

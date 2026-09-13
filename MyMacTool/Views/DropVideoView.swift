@@ -72,12 +72,13 @@ struct DropVideoView: View {
                         .frame(maxWidth: 250)
 
                     Picker("", selection: $vm.openaiModel) {
-                        Text("gpt-4o-mini").tag("gpt-4o-mini")
-                        Text("gpt-4o").tag("gpt-4o")
+                        Text("gpt-4o (tốt nhất)").tag("gpt-4o")
+                        Text("gpt-4.1").tag("gpt-4.1")
                         Text("gpt-4.1-mini").tag("gpt-4.1-mini")
+                        Text("gpt-4o-mini (rẻ)").tag("gpt-4o-mini")
                     }
                     .pickerStyle(.menu)
-                    .frame(maxWidth: 130)
+                    .frame(maxWidth: 160)
                 }
 
                 Text(vm.openaiAPIKey.isEmpty ? "Để trống = dùng Google/MyMemory miễn phí" : "✅ Sẽ ưu tiên dịch bằng OpenAI")

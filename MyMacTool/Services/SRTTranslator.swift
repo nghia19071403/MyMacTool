@@ -14,7 +14,7 @@ final class SRTTranslator {
     private init() {
         // Load API key đã lưu
         openaiAPIKey = UserDefaults.standard.string(forKey: "openai_api_key") ?? ""
-        openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o-mini"
+        openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o"
     }
 
     /// OpenAI API Key — set qua UI. Để trống = bỏ qua GPT.
@@ -22,8 +22,8 @@ final class SRTTranslator {
         didSet { UserDefaults.standard.set(openaiAPIKey, forKey: "openai_api_key") }
     }
 
-    /// Model OpenAI dùng để dịch
-    var openaiModel: String = "gpt-4o-mini" {
+    /// Model OpenAI dùng để dịch (mặc định gpt-4o — chất lượng cao nhất cho phụ đề)
+    var openaiModel: String = "gpt-4o" {
         didSet { UserDefaults.standard.set(openaiModel, forKey: "openai_model") }
     }
 
