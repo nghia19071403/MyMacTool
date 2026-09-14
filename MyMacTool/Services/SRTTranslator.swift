@@ -27,6 +27,57 @@ final class SRTTranslator {
         didSet { UserDefaults.standard.set(openaiModel, forKey: "openai_model") }
     }
 
+    // MARK: - Validate API Key
+
+    /// Kiểm tra OpenAI API key có dùng được không.
+    /// Gọi GET /v1/models (nhẹ, không tốn token). 200 = hợp lệ, 401 = sai key.
+    /// completion trả về (hợp lệ, thông báo).
+    func validateAPIKey(_ key: String, completion: @escaping (Bool, String) -> Void) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            completion(false, "Chưa nhập API key")
+            return
+        }
+        guard trimmed.hasPrefix("sk-") else {
+            completion(false, "Key không đúng định dạng (phải bắt đầu bằng sk-)")
+            return
+        }
+        guard let url = URL(string: "https://api.openai.com/v1/models") else {
+            completion(false, "URL không hợp lệ")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(trimmed)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    completion(false, "Lỗi mạng: \(error.localizedDescription)")
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    completion(false, "Không nhận được phản hồi")
+                    return
+                }
+                switch http.statusCode {
+                case 200:
+                    completion(true, "✅ Key hợp lệ, dùng được")
+                case 401:
+                    completion(false, "❌ Key sai hoặc đã bị thu hồi")
+                case 429:
+                    // 429 = key đúng nhưng hết quota/bị rate-limit
+                    completion(false, "⚠️ Key đúng nhưng hết quota hoặc bị giới hạn")
+                default:
+                    let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                    completion(false, "Lỗi HTTP \(http.statusCode): \(body.prefix(120))")
+                }
+            }
+        }.resume()
+    }
+
     // MARK: - Public API
 
     func translate(

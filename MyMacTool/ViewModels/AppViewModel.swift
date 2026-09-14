@@ -55,6 +55,18 @@ final class AppViewModel: ObservableObject {
         openaiAPIKey = UserDefaults.standard.string(forKey: "openai_api_key") ?? ""
         openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o"
 
+        // Load tốc độ xử lý đã lưu
+        if let saved = UserDefaults.standard.string(forKey: "processing_speed"),
+           let speed = ProcessingSpeed(rawValue: saved) {
+            processingSpeed = speed
+        }
+
+        // Load chất lượng Bilibili đã lưu
+        if let savedQ = UserDefaults.standard.string(forKey: "bilibili_quality"),
+           let q = VideoQuality(rawValue: savedQ) {
+            bilibiliQuality = q
+        }
+
         // Load giọng đã clone
         loadClonedVoices()
         loadDubbingHistory()
@@ -119,12 +131,19 @@ final class AppViewModel: ObservableObject {
     // MARK: - State: Link Download (tab Douyin)
 
     @Published var linkTexts: [LinkPlatform: String] = [
+        .bilibili: "",
         .douyin: ""
     ]
 
     @Published var downloadTasks: [LinkPlatform: [DownloadTask]] = [
+        .bilibili: [],
         .douyin: []
     ]
+
+    /// Chất lượng tải cho tab Bilibili — mặc định ưu tiên chất lượng cao nhất
+    @Published var bilibiliQuality: VideoQuality = .best {
+        didSet { UserDefaults.standard.set(bilibiliQuality.rawValue, forKey: "bilibili_quality") }
+    }
 
     // MARK: - State: Settings
 
@@ -132,14 +151,43 @@ final class AppViewModel: ObservableObject {
 
     // OpenAI settings cho dịch
     @Published var openaiAPIKey: String = "" {
-        didSet { SRTTranslator.shared.openaiAPIKey = openaiAPIKey }
+        didSet {
+            SRTTranslator.shared.openaiAPIKey = openaiAPIKey
+            // Key đổi → xóa kết quả kiểm tra cũ để tránh hiển thị nhầm
+            if openaiAPIKey != oldValue {
+                apiKeyCheckMessage = ""
+                apiKeyValid = false
+            }
+        }
     }
     @Published var openaiModel: String = "gpt-4o" {
         didSet { SRTTranslator.shared.openaiModel = openaiModel }
     }
 
+    // Trạng thái kiểm tra API key
+    @Published var isCheckingAPIKey: Bool = false
+    @Published var apiKeyCheckMessage: String = ""
+    @Published var apiKeyValid: Bool = false
+
+    /// Kiểm tra OpenAI API key có dùng được không.
+    func checkOpenAIKey() {
+        isCheckingAPIKey = true
+        apiKeyCheckMessage = "Đang kiểm tra key..."
+        apiKeyValid = false
+        SRTTranslator.shared.validateAPIKey(openaiAPIKey) { [weak self] valid, message in
+            self?.isCheckingAPIKey = false
+            self?.apiKeyValid = valid
+            self?.apiKeyCheckMessage = message
+        }
+    }
+
     @Published var maxConcurrentClips: Int = 2 {
         didSet { transcriptionService.maxConcurrent = maxConcurrentClips }
+    }
+
+    /// Tốc độ xử lý Whisper (điều khiển cpu_threads)
+    @Published var processingSpeed: ProcessingSpeed = .min {
+        didSet { UserDefaults.standard.set(processingSpeed.rawValue, forKey: "processing_speed") }
     }
 
     // MARK: - State: Dubbing (tab lồng tiếng)
@@ -202,7 +250,7 @@ final class AppViewModel: ObservableObject {
     // MARK: - Video Tasks (kéo file)
 
     func addTask(for url: URL) {
-        let task = VideoTask(url: url, srtOption: srtOutputOption)
+        let task = VideoTask(url: url, srtOption: srtOutputOption, cpuThreads: processingSpeed.cpuThreads)
         tasks.append(task)
         selectedTaskID = task.id
         loadVideoInfo(for: task)
@@ -749,9 +797,15 @@ final class AppViewModel: ObservableObject {
     private func downloadYtDlp(task dlTask: DownloadTask, urlString: String, platform: LinkPlatform) {
         let currentSrtOption = self.srtOutputOption
 
+        // Bilibili: chọn chất lượng + gửi Referer để CDN không cắt luồng
+        let formatSelector: String? = platform == .bilibili ? bilibiliQuality.formatSelector : nil
+        let referer: String? = platform == .bilibili ? "https://www.bilibili.com" : nil
+
         LinkDownloader.shared.download(
             urlString: urlString,
             platformFolder: platform.folderName,
+            formatSelector: formatSelector,
+            referer: referer,
             onProgress: { progress, message in
                 DispatchQueue.main.async {
                     guard !dlTask.isCancelled else { return }
@@ -783,7 +837,7 @@ final class AppViewModel: ObservableObject {
 
     /// Thêm video đã tải vào pipeline Whisper
     private func addVideoToWhisper(url: URL, srtOption: SRTOutputOption) {
-        let videoTask = VideoTask(url: url, srtOption: srtOption)
+        let videoTask = VideoTask(url: url, srtOption: srtOption, cpuThreads: processingSpeed.cpuThreads)
         tasks.append(videoTask)
         loadVideoInfo(for: videoTask)
         transcriptionService.enqueue(videoTask)

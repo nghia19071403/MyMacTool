@@ -416,4 +416,88 @@ final class SystemEnvironment {
 
         return env
     }
+
+    // MARK: - CPU Info
+
+    private var _cpuInfo: CPUInfo?
+
+    /// Đọc thông tin CPU của máy đang chạy (số nhân, P-core/E-core, tên chip).
+    /// Kết quả được cache. Dùng để tự chọn số luồng phù hợp trên mọi máy.
+    func cpuInfo() -> CPUInfo {
+        lock.lock(); defer { lock.unlock() }
+        if let cached = _cpuInfo { return cached }
+        let info = Self.readCPUInfo()
+        _cpuInfo = info
+        return info
+    }
+
+    private static func readCPUInfo() -> CPUInfo {
+        func sysctlInt(_ name: String) -> Int? {
+            var value: Int = 0
+            var size = MemoryLayout<Int>.size
+            let result = sysctlbyname(name, &value, &size, nil, 0)
+            return result == 0 ? value : nil
+        }
+
+        func sysctlString(_ name: String) -> String? {
+            var size = 0
+            guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+            var buffer = [CChar](repeating: 0, count: size)
+            guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return nil }
+            return String(cString: buffer)
+        }
+
+        // Tổng nhân logic (bao gồm hyper-threading trên Intel)
+        let logical = sysctlInt("hw.logicalcpu")
+            ?? ProcessInfo.processInfo.activeProcessorCount
+        // Nhân vật lý
+        let physical = sysctlInt("hw.physicalcpu") ?? logical
+        // P-core / E-core (chỉ Apple Silicon mới có perflevel)
+        let pCores = sysctlInt("hw.perflevel0.physicalcpu")
+        let eCores = sysctlInt("hw.perflevel1.physicalcpu")
+        // Tên chip
+        let brand = sysctlString("machdep.cpu.brand_string")
+            ?? sysctlString("hw.model")
+            ?? "Unknown CPU"
+
+        return CPUInfo(
+            brand: brand,
+            logicalCores: logical,
+            physicalCores: physical,
+            performanceCores: pCores,
+            efficiencyCores: eCores
+        )
+    }
+}
+
+// MARK: - CPUInfo
+
+/// Thông tin CPU của máy đang chạy.
+struct CPUInfo {
+    let brand: String            // VD "Apple M2" / "Intel(R) Core(TM) i7..."
+    let logicalCores: Int        // tổng luồng logic
+    let physicalCores: Int       // nhân vật lý
+    let performanceCores: Int?   // P-core (nil nếu không phải Apple Silicon)
+    let efficiencyCores: Int?    // E-core (nil nếu không phải Apple Silicon)
+
+    /// Có phải Apple Silicon (có phân P-core/E-core) không.
+    var isAppleSilicon: Bool { performanceCores != nil }
+
+    /// Số luồng "khuyến nghị" để chạy tác vụ nặng mà không nuốt hết máy.
+    /// Apple Silicon: ưu tiên số P-core (nhanh, không đụng E-core lo việc nền).
+    /// Còn lại: ~3/4 số nhân logic.
+    var recommendedThreads: Int {
+        if let p = performanceCores, p > 0 {
+            return p
+        }
+        return Swift.max(2, logicalCores * 3 / 4)
+    }
+
+    /// Mô tả gọn để hiển thị cho người dùng.
+    var summary: String {
+        if let p = performanceCores, let e = efficiencyCores {
+            return "\(brand) · \(logicalCores) nhân (\(p)P + \(e)E)"
+        }
+        return "\(brand) · \(logicalCores) nhân"
+    }
 }

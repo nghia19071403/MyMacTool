@@ -25,10 +25,14 @@ final class VideoTask: Identifiable, ObservableObject, Equatable {
     /// Model Whisper được chọn (auto hoặc user override)
     var whisperModel: WhisperModel = .auto
 
-    init(url: URL, srtOption: SRTOutputOption = .both, whisperModel: WhisperModel = .auto) {
+    /// Số luồng CPU cho Whisper (0 = để thư viện tự quyết, như hiện tại)
+    var cpuThreads: Int = 0
+
+    init(url: URL, srtOption: SRTOutputOption = .both, whisperModel: WhisperModel = .auto, cpuThreads: Int = 0) {
         self.url = url
         self.srtOutputOption = srtOption
         self.whisperModel = whisperModel
+        self.cpuThreads = cpuThreads
     }
 
     var displayName: String {

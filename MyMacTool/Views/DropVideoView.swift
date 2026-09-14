@@ -55,6 +55,37 @@ struct DropVideoView: View {
                     .foregroundStyle(.tertiary)
             }
 
+            // Setting tốc độ xử lý (cpu_threads của Whisper)
+            VStack(spacing: 2) {
+                HStack {
+                    Text("Tốc độ xử lý:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("", selection: $vm.processingSpeed) {
+                        ForEach(ProcessingSpeed.allCases) { speed in
+                            Text(speed.rawValue).tag(speed)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 200)
+
+                    Text(vm.processingSpeed.hint)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+
+                // Thông tin CPU của máy đang chạy (đọc động)
+                HStack(spacing: 4) {
+                    Image(systemName: "cpu")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Text("Máy này: \(SystemEnvironment.shared.cpuInfo().summary)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
             // OpenAI API key cho dịch chất lượng cao
             VStack(spacing: 6) {
                 HStack {
@@ -79,11 +110,31 @@ struct DropVideoView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(maxWidth: 160)
+
+                    Button {
+                        vm.checkOpenAIKey()
+                    } label: {
+                        if vm.isCheckingAPIKey {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Kiểm tra")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(vm.openaiAPIKey.isEmpty || vm.isCheckingAPIKey)
                 }
 
-                Text(vm.openaiAPIKey.isEmpty ? "Để trống = dùng Google/MyMemory miễn phí" : "✅ Sẽ ưu tiên dịch bằng OpenAI")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                // Kết quả kiểm tra key (nếu đã bấm), nếu chưa thì hint mặc định
+                if !vm.apiKeyCheckMessage.isEmpty {
+                    Text(vm.apiKeyCheckMessage)
+                        .font(.caption2)
+                        .foregroundStyle(vm.apiKeyValid ? .green : .red)
+                } else {
+                    Text(vm.openaiAPIKey.isEmpty ? "Để trống = dùng Google/MyMemory miễn phí" : "✅ Sẽ ưu tiên dịch bằng OpenAI")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
             .padding(.top, 4)
 

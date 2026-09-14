@@ -57,6 +57,28 @@ struct LinkInputView: View {
             }
             .frame(maxWidth: 500, alignment: .leading)
 
+            // Chọn chất lượng video (chỉ Bilibili)
+            if platform == .bilibili {
+                HStack {
+                    Text("Chất lượng:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("", selection: $vm.bilibiliQuality) {
+                        ForEach(VideoQuality.allCases) { q in
+                            Text(q.rawValue).tag(q)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 150)
+
+                    Text("(720p ưu tiên H.264, tải ổn định)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: 500, alignment: .leading)
+            }
+
             // Setting số clip xử lý song song
             HStack {
                 Text("Xử lý đồng thời:")

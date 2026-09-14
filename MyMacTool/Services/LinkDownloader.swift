@@ -12,6 +12,8 @@ final class LinkDownloader {
     func download(
         urlString: String,
         platformFolder: String,
+        formatSelector: String? = nil,
+        referer: String? = nil,
         onProgress: @escaping (Double, String) -> Void,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
@@ -50,6 +52,24 @@ final class LinkDownloader {
 
             let process = Process()
             var arguments = [trimmed, "-o", outputTemplate, "--no-playlist", "--newline"]
+
+            // Chọn chất lượng/format (Bilibili ưu tiên H.264 để tránh CDN cắt AV1)
+            if let formatSelector, !formatSelector.isEmpty {
+                arguments += ["-f", formatSelector]
+            }
+
+            // Referer giúp CDN Bilibili không từ chối luồng.
+            // KHÔNG dùng "--downloader ffmpeg": nó hay ghép thiếu audio (chỉ được vài
+            // giây tiếng) khiến video 20 phút chỉ có ~30s audio → Whisper dừng sớm.
+            // Downloader mặc định của yt-dlp tải trọn cả 2 luồng rồi tự ghép đủ.
+            if let referer, !referer.isEmpty {
+                arguments += ["--add-header", "Referer:\(referer)"]
+            }
+            arguments += [
+                "--retries", "30",
+                "--fragment-retries", "30",
+                "--file-access-retries", "10"
+            ]
 
             switch ytdlp {
             case .binary(let path):

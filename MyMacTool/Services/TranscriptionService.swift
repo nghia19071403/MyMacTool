@@ -126,6 +126,7 @@ final class TranscriptionService: ObservableObject {
         input_file = sys.argv[1]
         output_dir = sys.argv[2]
         model_size = sys.argv[3]
+        cpu_threads = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 
         base_name = os.path.splitext(os.path.basename(input_file))[0]
         srt_path = os.path.join(output_dir, base_name + ".srt")
@@ -133,10 +134,11 @@ final class TranscriptionService: ObservableObject {
         try:
             print("Loading model...", flush=True)
             from faster_whisper import WhisperModel
-            model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            # cpu_threads=0 => để thư viện tự quyết (hành vi mặc định cũ)
+            model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
 
             print("Transcribing...", flush=True)
-            segments, info = model.transcribe(input_file, language="zh", beam_size=5)
+            segments, info = model.transcribe(input_file, language="zh", beam_size=1)
 
             print(f"Detected language: {info.language} (prob={info.language_probability:.2f})", flush=True)
 
@@ -165,7 +167,7 @@ final class TranscriptionService: ObservableObject {
             sys.exit(1)
         """
 
-        process.arguments = ["-c", script, task.url.path, outputDirectory.path, modelName]
+        process.arguments = ["-c", script, task.url.path, outputDirectory.path, modelName, String(task.cpuThreads)]
 
         // Dùng environment đầy đủ để Python tìm thấy packages + ffmpeg
         var environment = SystemEnvironment.pythonEnvironment(for: python)

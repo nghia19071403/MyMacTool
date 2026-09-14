@@ -45,6 +45,7 @@ enum SRTOutputOption: String, CaseIterable, Identifiable {
 
 /// Nền tảng video hỗ trợ dán link tải
 enum LinkPlatform: String, CaseIterable, Identifiable {
+    case bilibili = "Bilibili"
     case douyin = "Douyin"
 
     var id: String { rawValue }
@@ -54,12 +55,14 @@ enum LinkPlatform: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .bilibili: return "play.tv"
         case .douyin: return "music.note"
         }
     }
 
     var placeholder: String {
         switch self {
+        case .bilibili: return "Dán link Bilibili vào đây (bilibili.com/video/BV... hoặc b23.tv/...)..."
         case .douyin: return "Dán link Douyin vào đây (v.douyin.com/xxxxx)..."
         }
     }
@@ -142,6 +145,101 @@ enum WhisperModel: String, CaseIterable, Identifiable {
         case ..<900:    return "base"    // 5-15 phút → base
         case ..<3600:   return "small"   // 15-60 phút → small
         default:        return "medium"  // > 60 phút → medium
+        }
+    }
+}
+
+// MARK: - VideoQuality
+
+/// Chất lượng tải video (dùng cho tab Bilibili).
+/// Ưu tiên codec H.264 (avc1) vì luồng AV1 của Bilibili hay bị CDN cắt kết nối.
+enum VideoQuality: String, CaseIterable, Identifiable {
+    case best = "Tốt nhất"
+    case p1080 = "1080p"
+    case p720 = "720p"
+    case p480 = "480p"
+    case p360 = "360p"
+    case audioOnly = "Chỉ âm thanh"
+
+    var id: String { rawValue }
+
+    /// Chuỗi -f cho yt-dlp. Ưu tiên avc1 (H.264), fallback dần để luôn tải được.
+    var formatSelector: String {
+        switch self {
+        case .best:
+            // Cao nhất: ưu tiên H.264 (tải ổn định), rồi H.265, cuối cùng mọi codec.
+            // yt-dlp tự lấy độ phân giải cao nhất trong nhóm được chọn.
+            return "bv*[vcodec^=avc1]+ba/bv*[vcodec^=hvc1]+ba/bv*+ba/b"
+        case .p1080:
+            return "bv*[height<=1080][vcodec^=avc1]+ba/bv*[height<=1080]+ba/b[height<=1080]"
+        case .p720:
+            return "bv*[height<=720][vcodec^=avc1]+ba/bv*[height<=720]+ba/b[height<=720]"
+        case .p480:
+            return "bv*[height<=480][vcodec^=avc1]+ba/bv*[height<=480]+ba/b[height<=480]"
+        case .p360:
+            return "bv*[height<=360][vcodec^=avc1]+ba/bv*[height<=360]+ba/b[height<=360]"
+        case .audioOnly:
+            return "ba/bestaudio"
+        }
+    }
+}
+
+// MARK: - ProcessingSpeed
+
+/// Tốc độ xử lý Whisper — điều khiển số luồng CPU (cpu_threads).
+/// Min = như hiện tại (để faster-whisper tự quyết, thường ít luồng, máy mát).
+/// Max = dùng hết số nhân của máy (nhanh nhất, máy nóng/ồn hơn).
+enum ProcessingSpeed: String, CaseIterable, Identifiable {
+    case min = "Tiết kiệm (mặc định)"
+    case auto = "Tự động (theo máy)"
+    case balanced = "Cân bằng"
+    case fast = "Nhanh"
+    case max = "Tối đa (dùng hết nhân)"
+
+    var id: String { rawValue }
+
+    /// Thông tin CPU của máy đang chạy (đọc động, khác nhau trên mỗi máy).
+    private var cpu: CPUInfo { SystemEnvironment.shared.cpuInfo() }
+
+    /// Tổng số nhân logic của máy đang chạy.
+    static var coreCount: Int {
+        SystemEnvironment.shared.cpuInfo().logicalCores
+    }
+
+    /// Số luồng CPU truyền cho WhisperModel(cpu_threads=...).
+    /// Trả về 0 nghĩa là KHÔNG set (để thư viện tự quyết như hiện tại).
+    /// Các mức khác tính động theo CPU thật của máy → chạy tối ưu trên mọi máy.
+    var cpuThreads: Int {
+        let info = cpu
+        let cores = info.logicalCores
+        switch self {
+        case .min:
+            return 0                                   // như hiện tại — không ép số luồng
+        case .auto:
+            return info.recommendedThreads             // theo máy: P-core hoặc ~3/4 nhân
+        case .balanced:
+            return Swift.max(2, cores / 2)             // ~nửa số nhân
+        case .fast:
+            return Swift.max(2, cores * 3 / 4)         // ~3/4 số nhân
+        case .max:
+            return cores                               // dùng hết nhân
+        }
+    }
+
+    /// Mô tả ngắn hiển thị dưới dropdown — phản ánh CPU thật của máy.
+    var hint: String {
+        let info = cpu
+        switch self {
+        case .min:
+            return "Máy mát, chạy nền tốt (như cũ)"
+        case .auto:
+            return "Tự chọn \(info.recommendedThreads) luồng cho \(info.summary)"
+        case .balanced:
+            return "Nhanh hơn, máy vẫn mượt (\(Swift.max(2, info.logicalCores / 2)) luồng)"
+        case .fast:
+            return "Nhanh, máy hơi nóng (\(Swift.max(2, info.logicalCores * 3 / 4)) luồng)"
+        case .max:
+            return "Nhanh nhất, dùng hết \(info.logicalCores) luồng — máy nóng/ồn"
         }
     }
 }
