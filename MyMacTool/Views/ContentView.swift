@@ -35,6 +35,8 @@ struct MainContentView: View {
                     DropVideoView(vm: vm)
                 case .dubbing:
                     DubbingView(vm: vm)
+                case .trending:
+                    TrendingView(vm: vm)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

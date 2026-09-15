@@ -14,6 +14,7 @@ final class AppViewModel: ObservableObject {
 
     let transcriptionService = TranscriptionService()
     let dubbingService = DubbingService.shared
+    let trendingService = TrendingService.shared
 
     // MARK: - Init
 
@@ -54,6 +55,10 @@ final class AppViewModel: ObservableObject {
         // Load OpenAI key đã lưu
         openaiAPIKey = UserDefaults.standard.string(forKey: "openai_api_key") ?? ""
         openaiModel = UserDefaults.standard.string(forKey: "openai_model") ?? "gpt-4o"
+
+        // Đồng bộ key/model xuống TrendingService (phòng didSet không chạy trong init)
+        trendingService.openaiAPIKey = openaiAPIKey
+        trendingService.openaiModel = openaiModel
 
         // Load tốc độ xử lý đã lưu
         if let saved = UserDefaults.standard.string(forKey: "processing_speed"),
@@ -153,6 +158,7 @@ final class AppViewModel: ObservableObject {
     @Published var openaiAPIKey: String = "" {
         didSet {
             SRTTranslator.shared.openaiAPIKey = openaiAPIKey
+            trendingService.openaiAPIKey = openaiAPIKey
             // Key đổi → xóa kết quả kiểm tra cũ để tránh hiển thị nhầm
             if openaiAPIKey != oldValue {
                 apiKeyCheckMessage = ""
@@ -161,7 +167,10 @@ final class AppViewModel: ObservableObject {
         }
     }
     @Published var openaiModel: String = "gpt-4o" {
-        didSet { SRTTranslator.shared.openaiModel = openaiModel }
+        didSet {
+            SRTTranslator.shared.openaiModel = openaiModel
+            trendingService.openaiModel = openaiModel
+        }
     }
 
     // Trạng thái kiểm tra API key
@@ -213,6 +222,22 @@ final class AppViewModel: ObservableObject {
     // History
     @Published var dubbingHistory: [DubbingHistoryItem] = []
 
+    // MARK: - State: Trending (tab Xu hướng)
+
+    @Published var trendingSource: TrendingSource = .bilibili
+
+    /// State riêng cho từng nguồn — Bilibili và Douyin KHÔNG dùng chung dữ liệu.
+    @Published var trendingStates: [TrendingSource: TrendingState] = [
+        .bilibili: TrendingState(),
+        .douyin: TrendingState()
+    ]
+
+    /// State của nguồn đang xem (đọc/ghi tiện lợi từ View).
+    var currentTrending: TrendingState {
+        get { trendingStates[trendingSource] ?? TrendingState() }
+        set { trendingStates[trendingSource] = newValue }
+    }
+
     // Tạm giữ data clone chờ user confirm
     private var pendingClonedVoice: ClonedVoice?
     private var clonePreviewAudioURL: URL?
@@ -244,6 +269,8 @@ final class AppViewModel: ObservableObject {
             return tasks.contains { $0.status.isActive }
         case .dubbing:
             return currentDubbingTask?.status.isActive == true
+        case .trending:
+            return trendingStates.values.contains { $0.isLoading }
         }
     }
 
@@ -450,6 +477,71 @@ final class AppViewModel: ObservableObject {
 
     func resetDubbing() {
         currentDubbingTask = nil
+    }
+
+    // MARK: - Trending
+
+    /// Lấy + phân tích xu hướng cho 1 nguồn cụ thể. Mỗi nguồn có state riêng,
+    /// tải độc lập — nút "Lấy xu hướng" chỉ ảnh hưởng nguồn đang xem.
+    func loadTrending() {
+        let source = trendingSource
+
+        // Đang tải nguồn này rồi thì bỏ qua (nguồn kia vẫn tải song song được)
+        guard trendingStates[source]?.isLoading != true else { return }
+
+        // Cập nhật trạng thái loading của riêng nguồn này
+        var state = trendingStates[source] ?? TrendingState()
+        state.isLoading = true
+        state.statusMessage = "Đang tải..."
+        trendingStates[source] = state
+
+        // Đảm bảo key/model mới nhất
+        trendingService.openaiAPIKey = openaiAPIKey
+        trendingService.openaiModel = openaiModel
+
+        let onProgress: (String) -> Void = { [weak self] msg in
+            guard let self else { return }
+            var s = self.trendingStates[source] ?? TrendingState()
+            s.statusMessage = msg
+            self.trendingStates[source] = s
+        }
+
+        let handle: (Result<TrendingResult, Error>) -> Void = { [weak self] result in
+            guard let self else { return }
+            var s = self.trendingStates[source] ?? TrendingState()
+            s.isLoading = false
+            switch result {
+            case .success(let data):
+                s.videos = data.videos
+                s.keywords = data.keywords
+                s.topics = data.topics
+                s.generatedAt = data.generatedAt
+                let count = source == .bilibili ? data.videos.count : data.keywords.count
+                let unit = source == .bilibili ? "video" : "từ khóa"
+                if data.topics.isEmpty {
+                    s.statusMessage = "Đã lấy \(count) \(unit). Nhập OpenAI key (tab Kéo file) để phân tích chủ đề."
+                } else {
+                    s.statusMessage = "Đã phân tích \(count) \(unit) → \(data.topics.count) chủ đề hot."
+                }
+            case .failure(let error):
+                s.statusMessage = "Lỗi: \(error.localizedDescription)"
+            }
+            self.trendingStates[source] = s
+        }
+
+        switch source {
+        case .bilibili:
+            trendingService.fetchBilibiliTrending(pages: 3, onProgress: onProgress, completion: handle)
+        case .douyin:
+            trendingService.fetchDouyinTrending(onProgress: onProgress, completion: handle)
+        }
+    }
+
+    /// Mở link video trên trình duyệt
+    func openTrendingVideo(_ video: TrendingVideo) {
+        if let url = URL(string: video.url) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: - Clone Voice
